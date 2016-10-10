@@ -263,8 +263,6 @@ data SemiLattice a = SemiLattice
       -- associative.
   , bottom :: !a
       -- ^ Bottom is an unique element such that `forall a . join bottom a == a`.
-  , top    :: !a
-      -- ^ Top is an unique element such that `forall a . join top a == top`.
   }
 
 -- We'll actually need a "bounded semilattice", which can be achieved just by
@@ -333,7 +331,6 @@ sign1Lattice :: SemiLattice Sign1
 sign1Lattice = SemiLattice
   { join   = sign1Join
   , bottom = Bottom
-  , top    = Top
   }
 
 
@@ -341,7 +338,6 @@ varMapLattice :: S.Set Id -> SemiLattice a -> SemiLattice (M.Map Id a)
 varMapLattice vars l = SemiLattice
   { join   = M.unionWith (join l)
   , bottom = M.fromList (zip (S.toList vars) (repeat (bottom l)))
-  , top    = M.fromList (zip (S.toList vars) (repeat (top l)))
   }
 
 -- | Abstract evaluation.
@@ -429,7 +425,7 @@ sign1FlowAnal fun = FlowAnalysis
   , transferFunction = transfer_fun
   }
   where
-    lat = varMapLattice (S.fromList (funArgs fun ++ funLocals fun)) sign1Lattice
+    lat = varMapLattice (funVars fun) sign1Lattice
     cfg = funCFG fun
     cfg_transposed = transposeG (cfgGraph cfg)
 
@@ -458,7 +454,6 @@ livenessAnalLat :: S.Set Id -> SemiLattice (S.Set Id)
 livenessAnalLat vars = SemiLattice
   { join   = S.union
   , bottom = S.empty
-  , top    = vars
   }
 
 expVars :: Exp -> S.Set Id
@@ -565,7 +560,6 @@ availExprLat :: Fun -> SemiLattice (S.Set Exp)
 availExprLat fun = SemiLattice
   { join   = S.intersection
   , bottom = funExps fun
-  , top    = S.empty
   }
 
 availExprAnal :: Fun -> FlowAnalysis (S.Set Exp)
@@ -675,6 +669,101 @@ veryBusyExpr_test = Fun
   }
 
 --------------------------------------------------------------------------------
+-- * Constant propagation
+
+-- | Out lattice elements for constant propagation.
+data Const = TopConst | IntConst Int | BottomConst
+  deriving (Show, Eq)
+
+constJoin :: Const -> Const -> Const
+constJoin TopConst    _           = TopConst
+constJoin _           TopConst    = TopConst
+constJoin BottomConst c           = c
+constJoin c           BottomConst = c
+constJoin c1          c2
+  | c1 == c2  = c1
+  | otherwise = TopConst
+
+constPropLat :: SemiLattice Const
+constPropLat = SemiLattice
+  { join   = constJoin
+  , bottom = BottomConst
+  }
+
+applyOp' :: Binop -> Int -> Int -> Const
+applyOp' Plus  x y = IntConst (x + y)
+applyOp' Minus x y = IntConst (x - y)
+applyOp' Mult  x y = IntConst (x * y)
+applyOp' Div   x y = IntConst (x `div` y)
+applyOp' Gt    _ _ = TopConst
+applyOp' Eq    _ _ = TopConst
+
+applyConstPropOp :: Binop -> Const -> Const -> Const
+applyConstPropOp op (IntConst i1) (IntConst i2) = applyOp' op i1 i2
+
+-- TODO: ??? Confused here ???
+applyConstPropOp _  BottomConst   _             = BottomConst
+applyConstPropOp _  _             BottomConst   = BottomConst
+
+-- TODO: Can't we make this better by returning const for `T * 0`?
+applyConstPropOp _  TopConst      _             = TopConst
+applyConstPropOp _  _             TopConst      = TopConst
+
+evalConstProp :: M.Map Id Const -> Exp -> Const
+evalConstProp _ (Int i) = IntConst i
+evalConstProp m (Var i) =
+  fromJust (M.lookup i m)
+  -- or alternatively
+  -- fromMaybe TopConst (M.lookup i m)
+evalConstProp _ FunCall{} = TopConst
+evalConstProp m (Binop e1 op e2) = applyConstPropOp op (evalConstProp m e1) (evalConstProp m e2)
+evalConstProp _ Input = TopConst
+evalConstProp _ (AddrOf _) = TopConst
+evalConstProp _ Malloc = TopConst
+evalConstProp _ Deref{} = TopConst
+evalConstProp _ Null = TopConst
+
+constPropAnal :: Fun -> FlowAnalysis (M.Map Id Const)
+constPropAnal fun = FlowAnalysis
+  { lattice          = lat
+  , flowGraph        = cfg
+  , transferFunction = transfer_fun
+  }
+  where
+    lat = varMapLattice (funVars fun) constPropLat
+    cfg = funCFG fun
+    cfg_transposed = transposeG (cfgGraph cfg)
+
+    transfer_fun vtx ls =
+      let
+        preds = cfg_transposed ! vtx
+        stmt = cfgNodeStmts cfg ! vtx
+        pred_lats = map (ls !!) preds
+        join_ = foldl' (join lat) (bottom lat) pred_lats
+      in
+        case stmt of
+          var := rhs -> M.insert var (evalConstProp join_ rhs) join_
+          Seq{}      -> error "Seq in CFG."
+          _          -> join_
+
+constPropEx :: Fun
+constPropEx = Fun
+  { funName = ""
+  , funArgs = []
+  , funLocals = ["x", "y", "z"]
+  , funBody = stmts
+      [ "x" := Int 27
+      , "y" := Input
+      , "z" := Binop (Int 2) Mult (Binop "x" Plus "y")
+      , If (Binop (Int 0) Gt "x")
+           ("y" := Binop "z" Minus (Int 3))
+           ("y" := Int 12)
+      , Output "y"
+      ]
+  , funRet = Null
+  }
+
+--------------------------------------------------------------------------------
 
 showMapLatResult :: forall a . Show a => [M.Map Id a] -> String
 showMapLatResult maps = concat . map unlines $
@@ -736,8 +825,11 @@ main = do
     -- let !ret = solve (availExprAnal availExpr_test)
     -- putStrLn (showSetLatResult ret)
 
-    putStrLn (showCFG (funCFG veryBusyExpr_test))
-    let !ret = solve (veryBusyExprAnal veryBusyExpr_test)
-    putStrLn (showSetLatResult ret)
+    -- putStrLn (showCFG (funCFG veryBusyExpr_test))
+    -- let !ret = solve (veryBusyExprAnal veryBusyExpr_test)
+    -- putStrLn (showSetLatResult ret)
+
+    putStrLn (showCFG (funCFG constPropEx))
+    putStrLn (showMapLatResult (solve (constPropAnal constPropEx)))
 
     return ()
