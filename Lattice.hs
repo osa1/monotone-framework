@@ -1,6 +1,5 @@
 {-# OPTIONS_GHC -Wall #-}
 
-{-# LANGUAGE BangPatterns        #-}
 {-# LANGUAGE DeriveAnyClass      #-}
 {-# LANGUAGE DeriveGeneric       #-}
 {-# LANGUAGE OverloadedStrings   #-}
@@ -24,8 +23,6 @@ import Control.Monad.State.Strict (State, evalState, state)
 import Prelude hiding (exp, id, span)
 
 import Control.DeepSeq
-
-import Debug.Trace
 
 --------------------------------------------------------------------------------
 -- First we define our syntax.
@@ -526,13 +523,13 @@ livenessExample = Fun
 
 -- | Set of all expressions in a statement.
 stmtExps :: Stmt -> S.Set Exp
-stmtExps Skip = S.empty
-stmtExps (_ := e) = subExps e
-stmtExps (_ :*= e) = subExps e
-stmtExps (Output e) = subExps e
-stmtExps (Seq s1 s2) = stmtExps s1 `S.union` stmtExps s2
+stmtExps Skip         = S.empty
+stmtExps (_ := e)     = subExps e
+stmtExps (_ :*= e)    = subExps e
+stmtExps (Output e)   = subExps e
+stmtExps (Seq s1 s2)  = stmtExps s1 `S.union` stmtExps s2
 stmtExps (If e s1 s2) = subExps e `S.union` stmtExps s1 `S.union` stmtExps s2
-stmtExps (While e s) = subExps e `S.union` stmtExps s
+stmtExps (While e s)  = subExps e `S.union` stmtExps s
 
 -- | Set of all expression in the program. See `availExprLat`.
 funExps :: Fun -> S.Set Exp
@@ -764,6 +761,122 @@ constPropEx = Fun
   }
 
 --------------------------------------------------------------------------------
+-- * Interval analysis, done wrong.
+--
+-- This version uses an interval lattice with infinite height, so the fixpoint
+-- algorithm won't work.
+--
+-- (e.g. (0, 0) <= (0, 1) <= (0, 2) <= ... (0, inf) is an infinite chain in this
+-- lattice)
+--
+-- Note that in this implementation it's not possible to express "inifinity",
+-- e.g. no (0, inf). So in theory this lattice does not have infinite chain of
+-- (<=), but it's still bad enough in practice as it has a chain
+--
+--   (0, 0) <= (0, 1) <= ... <= (0, maxBound :: Int)
+--
+-- which is big enough that some programs will take forever to analyze (see
+-- example below).
+
+data Int0 = BotInt0 | Int0 Int Int
+  deriving (Show, Eq)
+
+topInt0 :: Int0
+topInt0 = Int0 minBound maxBound
+
+intLat0Join :: Int0 -> Int0 -> Int0
+intLat0Join BotInt0      x            = x
+intLat0Join x            BotInt0      = x
+intLat0Join (Int0 l1 h1) (Int0 l2 h2) = Int0 (min l1 l2) (max h1 h2)
+
+intLat0 :: SemiLattice Int0
+intLat0 = SemiLattice
+  { join   = intLat0Join
+  , bottom = BotInt0
+  }
+
+eval_intAnal0 :: M.Map Id Int0 -> Exp -> Int0
+eval_intAnal0 _ (Int i) = Int0 i i
+eval_intAnal0 m (Var v) = fromJust (M.lookup v m)
+eval_intAnal0 _ FunCall{} = topInt0
+eval_intAnal0 m (Binop e1 op e2) = apply_intAnal0 op (eval_intAnal0 m e1) (eval_intAnal0 m e2)
+eval_intAnal0 _ Input = topInt0
+eval_intAnal0 _ AddrOf{} = topInt0
+eval_intAnal0 _ Malloc{} = topInt0
+eval_intAnal0 _ Deref{} = topInt0
+eval_intAnal0 _ Null = topInt0
+
+apply_intAnal0 :: Binop -> Int0 -> Int0 -> Int0
+
+apply_intAnal0 Gt _ _ = topInt0
+apply_intAnal0 Eq _ _ = topInt0
+
+apply_intAnal0 _ BotInt0 x       = x
+apply_intAnal0 _ x       BotInt0 = x
+
+-- FIXME: overflows!!
+apply_intAnal0 op (Int0 l1 h1) (Int0 l2 h2) =
+  let
+    op' = case op of
+            Plus -> (+)
+            Minus -> (-)
+            Mult -> (*)
+            Div -> div
+            _ -> error "unreachable"
+
+    all_bounds = [ op' l h | l <- [ l1, h1 ], h <- [ l2, h2 ] ]
+    lower = minimum all_bounds
+    higher = maximum all_bounds
+  in
+    Int0 lower higher
+
+intAnal0 :: Fun -> FlowAnalysis (M.Map Id Int0)
+intAnal0 fun = FlowAnalysis
+  { lattice          = lat
+  , flowGraph        = cfg
+  , transferFunction = transfer_fun
+  }
+  where
+    lat = varMapLattice (funVars fun) intLat0
+    cfg = funCFG fun
+    cfg_transposed = transposeG (cfgGraph cfg)
+
+    transfer_fun vtx _
+      | vtx == entryNode = bottom lat
+    transfer_fun vtx ls =
+      let
+        -- predecessors of the node
+        preds = cfg_transposed ! vtx
+        -- node statement
+        stmt = cfgNodeStmts cfg ! vtx
+        -- lattices of predecessors
+        pred_lats = map (\p -> ls !! p) preds
+        join_ = foldl' (join lat) (bottom lat) pred_lats
+      in
+        case stmt of
+          var := rhs -> M.insert var (eval_intAnal0 join_ rhs) join_
+          Seq{}      -> error "Seq in CFG."
+          _          -> join_
+
+intAnal0_test :: Fun
+intAnal0_test = Fun
+  { funName = ""
+  , funArgs = []
+  , funLocals = ["x", "y"]
+  , funBody = stmts
+      [ "y" := Int 0
+      , "x" := Int 7
+      , "x" := Binop "x" Plus (Int 1)
+      , While Input $ stmts
+          [ "x" := (Int 7)
+          , "x" := Binop "x" Plus (Int 1)
+          , "y" := Binop "y" Plus (Int 1)
+          ]
+      ]
+  , funRet = Null
+  }
+
+--------------------------------------------------------------------------------
 
 showMapLatResult :: forall a . Show a => [M.Map Id a] -> String
 showMapLatResult maps = concat . map unlines $
@@ -829,7 +942,11 @@ main = do
     -- let !ret = solve (veryBusyExprAnal veryBusyExpr_test)
     -- putStrLn (showSetLatResult ret)
 
-    putStrLn (showCFG (funCFG constPropEx))
-    putStrLn (showMapLatResult (solve (constPropAnal constPropEx)))
+    -- putStrLn (showCFG (funCFG constPropEx))
+    -- putStrLn (showMapLatResult (solve (constPropAnal constPropEx)))
+
+    -- This will never terminate!
+    putStrLn (showCFG (funCFG intAnal0_test))
+    putStrLn (showMapLatResult (solve (intAnal0 intAnal0_test)))
 
     return ()
