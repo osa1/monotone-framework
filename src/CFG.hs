@@ -34,8 +34,8 @@ data Block = Block
 -- here.
 
 entryNode, exitNode, firstNode :: Vertex
-entryNode = 0
-exitNode  = 1
+entryNode = 1
+exitNode  = 0
 firstNode = 2
 
 --------------------------------------------------------------------------------
