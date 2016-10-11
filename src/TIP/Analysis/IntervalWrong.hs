@@ -20,7 +20,6 @@ module TIP.Analysis.IntervalWrong where
 
 import Data.Array ((!))
 import qualified Data.Map as M
-import Data.Maybe (fromJust)
 
 import Analysis
 import CFG
@@ -52,7 +51,7 @@ intLat = SemiLattice
 
 eval :: M.Map Id Interv -> Exp -> Interv
 eval _ (Int i) = Interv i i
-eval m (Var v) = fromJust (M.lookup v m)
+eval m (Var v) = M.findWithDefault Bot v m
 eval _ FunCall{} = topInt
 eval m (Binop e1 op e2) = apply op (eval m e1) (eval m e2)
 eval _ Input = topInt

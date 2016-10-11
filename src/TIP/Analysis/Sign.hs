@@ -4,7 +4,6 @@ module TIP.Analysis.Sign (signAnal) where
 
 import Data.Array
 import qualified Data.Map as M
-import Data.Maybe (fromJust)
 
 import Analysis
 import CFG
@@ -49,7 +48,7 @@ eval env exp =
       | i > 0     -> Pos
       | i < 0     -> Neg
       | otherwise -> Zero
-    Var v -> fromJust (M.lookup v env)
+    Var v -> M.findWithDefault Bottom v env
     Binop e1 op e2 -> applyOp op (eval env e1) (eval env e2)
     _ -> Top
 

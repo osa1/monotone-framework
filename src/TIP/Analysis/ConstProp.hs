@@ -4,7 +4,6 @@ module TIP.Analysis.ConstProp where
 
 import Data.Array ((!))
 import qualified Data.Map as M
-import Data.Maybe (fromJust)
 
 import Analysis
 import CFG
@@ -62,7 +61,7 @@ applyConstPropOp _  _             TopConst      = TopConst
 evalConstProp :: M.Map Id Const -> Exp -> Const
 evalConstProp _ (Int i) = IntConst i
 evalConstProp m (Var i) =
-  fromJust (M.lookup i m)
+  M.findWithDefault BottomConst i m
   -- or alternatively
   -- fromMaybe TopConst (M.lookup i m)
 evalConstProp _ FunCall{} = TopConst
