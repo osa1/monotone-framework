@@ -19,6 +19,7 @@ library
     SemiLattice,
     TIP.Analysis.AvailableExpr,
     TIP.Analysis.ConstProp,
+    TIP.Analysis.IntervalCorrect,
     TIP.Analysis.IntervalWrong,
     TIP.Analysis.Liveness,
     TIP.Analysis.Sign,
