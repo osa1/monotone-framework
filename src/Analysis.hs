@@ -7,6 +7,7 @@ module Analysis where
 import Data.Array ((!))
 import Data.Graph
 import Data.List (foldl')
+import Data.Maybe (fromMaybe)
 
 import CFG
 import SemiLattice
@@ -24,6 +25,18 @@ data FlowAnalysis a = FlowAnalysis
       -- ^ Constraint generator generates a "dataflow constraint" that relates
       -- the value of the node to the values of other nodes (typically to
       -- successor or predecessor nodes).
+  , widen         :: Maybe ([a] -> [a])
+      -- ^ Optional widening step. Requirements for a sound widening function:
+      --
+      --     - It should be "extensive":
+      --       `forall l . l <= widen l`.
+      --
+      --     - It should be "monotonic":
+      --       `forall l1 l2 . l1 <= l2 -> widen l1 <= widen l2
+      --
+      --     - It should operate on a subset of the original lattice that has
+      --       finite height ("bounded lattice"), so that the fixpoint algorithm
+      --       can work again.
   }
 
 -- | Helper for buildling forward analyses.
@@ -35,6 +48,7 @@ mkFwdAnal lat cfg trans = FlowAnalysis
   { lattice       = lat
   , flowGraph     = cfg
   , constraintGen = constr_gen
+  , widen         = Nothing
   }
   where
     -- need to transpose the graph to get predecessors
@@ -56,6 +70,7 @@ mkBkwAnal lat cfg trans = FlowAnalysis
   { lattice       = lat
   , flowGraph     = cfg
   , constraintGen = constr_gen
+  , widen         = Nothing
   }
   where
     constr_gen vtx ls =
@@ -81,7 +96,7 @@ solve flowAnal =
 
     -- This is what's called "combined function F : L^n -> L^n" in Chapter 5.
     f :: [a] -> [a]
-    f as = map ($ as) constrs
+    f as = fromMaybe id (widen flowAnal) (map ($ as) constrs)
 
     run l =
       let next = f l
