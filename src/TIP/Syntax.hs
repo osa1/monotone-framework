@@ -2,7 +2,6 @@ module TIP.Syntax where
 
 --------------------------------------------------------------------------------
 
-import Data.List (foldl')
 import qualified Data.Set as S
 import Data.String (IsString (..))
 
@@ -86,7 +85,8 @@ data Fun = Fun
 
 stmts :: [Stmt] -> Stmt
 stmts []       = Skip
-stmts (s : ss) = foldl' Seq s ss
+stmts [s]      = s
+stmts (s : ss) = Seq s (stmts ss)
 
 funVars :: Fun -> S.Set Id
 funVars fun = S.fromList (funArgs fun) `S.union` S.fromList (funLocals fun)
