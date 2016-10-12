@@ -17,6 +17,7 @@ library
     Analysis,
     CFG,
     SemiLattice,
+    TIP.Analysis
     TIP.Analysis.AvailableExpr,
     TIP.Analysis.ConstProp,
     TIP.Analysis.IntervalCorrect,

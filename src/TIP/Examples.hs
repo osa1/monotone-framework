@@ -5,6 +5,8 @@ module TIP.Examples where
 
 --------------------------------------------------------------------------------
 
+import Analysis
+import CFG
 import TIP.Syntax
 
 --------------------------------------------------------------------------------
@@ -160,14 +162,52 @@ intAnalExample = Fun
   , funArgs = []
   , funLocals = ["x", "y"]
   , funBody = stmts
-      [ "y" := Int 0
-      , "x" := Int 7
-      , "x" := Binop "x" Plus (Int 1)
-      , While Input $ stmts
-          [ "x" := (Int 7)
-          , "x" := Binop "x" Plus (Int 1)
-          , "y" := Binop "y" Plus (Int 1)
+      [ "y" := Int 0 -- 1
+      , "x" := Int 7 -- 2
+      , "x" := Binop "x" Plus (Int 1) -- 3
+      , While Input $ stmts -- 4
+          [ "x" := (Int 7) -- 5
+          , "x" := Binop "x" Plus (Int 1) -- 6
+          , "y" := Binop "y" Plus (Int 1) -- 7
           ]
       ]
   , funRet = Null
   }
+
+pathSensitivityExample :: Fun
+pathSensitivityExample = Fun
+  { funName = ""
+  , funArgs = []
+  , funLocals = ["x", "y", "z"]
+  , funBody = stmts
+      [ "x" := Input -- 1
+      , "y" := Int 0 -- 2
+      , "z" := Int 0 -- 3
+      , While (Binop "x" Gt (Int 0)) $ stmts -- 4
+          [ "z" := Binop "z" Plus "x" -- 5
+          , If (Binop (Int 17) Gt "y") -- 6
+               ("y" := Binop "y" Plus (Int 1)) -- 7
+               Skip -- 8
+          , "x" := Binop "x" Minus (Int 1) -- 9
+          ]
+      ]
+  , funRet = Null
+  }
+
+--------------------------------------------------------------------------------
+
+allExamples :: [Fun]
+allExamples =
+  [ ite, rec, bar
+  , livenessExample
+  , veryBusyExprExample
+  , constPropExample
+  , intAnalExample
+  ]
+
+--------------------------------------------------------------------------------
+
+runExample :: Eq ret => Fun -> (Fun -> FlowAnalysis ret) -> ([ret] -> String) -> IO ()
+runExample fun anal toStr = do
+    putStrLn (show (funCFG fun))
+    putStrLn (toStr (solve (anal fun)))
