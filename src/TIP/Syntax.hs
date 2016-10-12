@@ -83,10 +83,16 @@ data Fun = Fun
 --------------------------------------------------------------------------------
 -- * Utilities
 
+-- | A smart `Seq` constructor that skips `Skip` statements.
+seqs :: Stmt -> Stmt -> Stmt
+seqs Skip s = s
+seqs s Skip = s
+seqs s1 s2  = Seq s1 s2
+
 stmts :: [Stmt] -> Stmt
 stmts []       = Skip
 stmts [s]      = s
-stmts (s : ss) = Seq s (stmts ss)
+stmts (s : ss) = s `seqs` stmts ss
 
 funVars :: Fun -> S.Set Id
 funVars fun = S.fromList (funArgs fun) `S.union` S.fromList (funLocals fun)
