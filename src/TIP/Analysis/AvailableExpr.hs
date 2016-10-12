@@ -20,7 +20,6 @@ availExprLat fun = SemiLattice
   , bottom = funExps fun
   }
 
-
 availExprAnal :: Fun -> FlowAnalysis (S.Set Exp)
 availExprAnal fun = mkFwdAnal lat cfg trans
   where
