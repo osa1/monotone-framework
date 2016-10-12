@@ -9,7 +9,7 @@ module TIP.Analysis.IntervalWrong where
 
 --------------------------------------------------------------------------------
 
-import Data.Array ((!))
+import qualified Data.Graph.Inductive as G
 import qualified Data.Map as M
 
 import Analysis
@@ -37,9 +37,9 @@ data InfInt
   deriving (Eq, Ord)
 
 instance Show InfInt where
-  show NegInf = "-∞"
+  show NegInf      = "-∞"
   show (Integer i) = show i
-  show PosInf = "+∞"
+  show PosInf      = "+∞"
 
 -- | Is the interval empty?
 isEmptyInterv :: Interv -> Bool
@@ -153,10 +153,10 @@ apply Div _ _ = topInt
 
 apply Plus (Interv l1 h1) (Interv l2 h2) =
   let
-    add NegInf _ = NegInf
-    add _ NegInf = NegInf
-    add PosInf _ = PosInf
-    add _ PosInf = PosInf
+    add NegInf _                  = NegInf
+    add _ NegInf                  = NegInf
+    add PosInf _                  = PosInf
+    add _ PosInf                  = PosInf
     add (Integer i1) (Integer i2) = Integer (i1 + i2)
   in
     Interv (add l1 l2) (add h1 h2)
@@ -183,7 +183,7 @@ intAnal fun = mkFwdAnal lat cfg trans
     cfg = funCFG fun
 
     trans join_ cur =
-      case cfgNodeStmts cfg ! cur of
+      case G.lab' (G.context cfg cur) of
         var := rhs -> M.insert var (eval join_ rhs) join_
         Seq{}      -> error "Seq in CFG."
         _          -> join_

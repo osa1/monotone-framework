@@ -36,6 +36,8 @@ library
     array           >=0.5 && <0.6,
     base            >=4.9 && <4.10,
     containers      >=0.5 && <0.6,
+    fgl             >=5.5.3.0 && <5.6,
+    fgl-visualize,
     mtl             >=2.2 && <2.3
 
   hs-source-dirs:      src

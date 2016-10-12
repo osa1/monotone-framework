@@ -2,8 +2,8 @@ module TIP.Analysis.Liveness (livenessAnal) where
 
 --------------------------------------------------------------------------------
 
+import qualified Data.Graph.Inductive as G
 import qualified Data.Set as S
-import Data.Array ((!))
 
 import Analysis
 import CFG
@@ -27,7 +27,7 @@ livenessAnal fun = mkBkwAnal lat cfg trans
     trans join_ cur
       | cur == exitNode = S.empty
       | otherwise =
-        case cfgNodeStmts cfg ! cur of
+        case G.lab' (G.context cfg cur) of
           Skip      -> join_
           var := e  -> S.delete var join_ `S.union` expVars e
           var :*= e -> S.delete var join_ `S.union` expVars e

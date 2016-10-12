@@ -4,8 +4,7 @@ module Analysis where
 
 --------------------------------------------------------------------------------
 
-import Data.Array ((!))
-import Data.Graph
+import qualified Data.Graph.Inductive as G
 import Data.List (foldl')
 import Data.Maybe (fromMaybe)
 
@@ -21,7 +20,7 @@ data FlowAnalysis a = FlowAnalysis
       -- ^ The lattice
   , flowGraph     :: CFG
       -- ^ The flow graph
-  , constraintGen :: Vertex -> ([a] -> a)
+  , constraintGen :: G.Node -> ([a] -> a)
       -- ^ Constraint generator generates a "dataflow constraint" that relates
       -- the value of the node to the values of other nodes (typically to
       -- successor or predecessor nodes).
@@ -41,7 +40,7 @@ data FlowAnalysis a = FlowAnalysis
 
 -- | Helper for buildling forward analyses.
 mkFwdAnal :: SemiLattice a -> CFG
-          -> (a -> Vertex -> a)
+          -> (a -> G.Node -> a)
              -- ^ a: LUB of predecessors, Vertex: Current node
           -> FlowAnalysis a
 mkFwdAnal lat cfg trans = FlowAnalysis
@@ -51,19 +50,17 @@ mkFwdAnal lat cfg trans = FlowAnalysis
   , widen         = Nothing
   }
   where
-    -- need to transpose the graph to get predecessors
-    cfg_transposed = transposeG (cfgGraph cfg)
-    constr_gen vtx ls =
+    constr_gen node ls =
       let
-        preds     = cfg_transposed ! vtx
+        preds     = G.pre' (G.context cfg node)
         pred_lats = map (ls !!) preds
         join_     = foldl' (join lat) (bottom lat) pred_lats
       in
-        trans join_ vtx
+        trans join_ node
 
 -- | Helper for buildling backward analyses.
 mkBkwAnal :: SemiLattice a -> CFG
-          -> (a -> Vertex -> a)
+          -> (a -> G.Node -> a)
              -- ^ a: LUB of successors, Vertex: Current node
           -> FlowAnalysis a
 mkBkwAnal lat cfg trans = FlowAnalysis
@@ -73,13 +70,13 @@ mkBkwAnal lat cfg trans = FlowAnalysis
   , widen         = Nothing
   }
   where
-    constr_gen vtx ls =
+    constr_gen node ls =
       let
-        succs     = cfgGraph cfg ! vtx
+        succs     = G.suc' (G.context cfg node)
         succ_lats = map (ls !!) succs
         join_     = foldl' (join lat) (bottom lat) succ_lats
       in
-        trans join_ vtx
+        trans join_ node
 
 -- | A simple solver. Finds minimal solution if lattice is bounded, but does it
 -- inefficiently.
@@ -89,10 +86,10 @@ solve flowAnal =
     -- fixpoint
     run l0
   where
-    l0  = replicate (length vtx) (bottom (lattice flowAnal))
+    l0  = replicate (length nodes) (bottom (lattice flowAnal))
 
-    vtx = vertices (cfgGraph (flowGraph flowAnal))
-    constrs = map (constraintGen flowAnal) vtx
+    nodes = map fst (G.labNodes (flowGraph flowAnal))
+    constrs = map (constraintGen flowAnal) nodes
 
     -- This is what's called "combined function F : L^n -> L^n" in Chapter 5.
     f :: [a] -> [a]

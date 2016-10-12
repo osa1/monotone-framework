@@ -2,7 +2,7 @@ module TIP.Analysis.ConstProp where
 
 --------------------------------------------------------------------------------
 
-import Data.Array ((!))
+import qualified Data.Graph.Inductive as G
 import qualified Data.Map as M
 
 import Analysis
@@ -81,7 +81,7 @@ constPropAnal fun = mkFwdAnal lat cfg trans
     cfg = funCFG fun
 
     trans join_ cur =
-      case cfgNodeStmts cfg ! cur of
+      case G.lab' (G.context cfg cur) of
         var := rhs -> M.insert var (evalConstProp join_ rhs) join_
         Seq{}      -> error "Seq in CFG."
         _          -> join_

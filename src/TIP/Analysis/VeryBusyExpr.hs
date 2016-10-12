@@ -2,7 +2,7 @@ module TIP.Analysis.VeryBusyExpr where
 
 --------------------------------------------------------------------------------
 
-import Data.Array ((!))
+import qualified Data.Graph.Inductive as G
 import qualified Data.Set as S
 
 import Analysis
@@ -27,7 +27,7 @@ veryBusyExprAnal fun = mkBkwAnal lat cfg trans
     trans join_ cur
       | cur == exitNode = S.empty
       | otherwise =
-        case cfgNodeStmts cfg ! cur of
+        case G.lab' (G.context cfg cur) of
           Skip      -> join_
           x := e    -> removeReferencing join_ x `S.union` subExps e
           x :*= e   -> removeReferencing join_ x `S.union` subExps e

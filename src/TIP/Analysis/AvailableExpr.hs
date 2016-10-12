@@ -2,7 +2,7 @@ module TIP.Analysis.AvailableExpr where
 
 --------------------------------------------------------------------------------
 
-import Data.Array ((!))
+import qualified Data.Graph.Inductive as G
 import qualified Data.Set as S
 
 import Analysis
@@ -29,7 +29,7 @@ availExprAnal fun = mkFwdAnal lat cfg trans
     trans join_ cur
       | cur == entryNode = S.empty
       | otherwise =
-        case cfgNodeStmts cfg ! cur of
+        case G.lab' (G.context cfg cur) of
           Skip      -> join_
           x := e    -> removeReferencing (join_ `S.union` subExps e) x
           x :*= e   -> removeReferencing (join_ `S.union` subExps e) x

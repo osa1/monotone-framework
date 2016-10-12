@@ -1,13 +1,14 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TupleSections #-}
 
 module CFG
   ( CFG (..)
   , entryNode, exitNode
-  , connectCFGs
+  -- , connectCFGs
   , funCFG
-  , pgmCFG
-  , concatCFGs
+  -- , pgmCFG
+  -- , concatCFGs
   ) where
 
 --------------------------------------------------------------------------------
@@ -15,35 +16,27 @@ module CFG
 import Control.Monad (forM)
 import Control.Monad.State.Strict (State, evalState, state)
 import Control.Monad.Writer (WriterT, runWriterT, tell)
-import Data.Graph
 import qualified Data.Map as M
+import Data.Bifunctor (first)
 import qualified Data.Set as S
 
-import qualified Array as A
+import qualified Data.Graph.Inductive as G
+import qualified Data.Graph.Inductive.PatriciaTree as GI
+
 import TIP.Syntax
 import Utils
 
 --------------------------------------------------------------------------------
 
-data CFG = CFG
-  { cfgGraph     :: !Graph
-      -- ^ The actual control flow graph. Edges go to successors.
-  , cfgNodeStmts :: !(A.Array Stmt)
-      -- ^ Statements of nodes.
-  }
-
--- | Only used as intermediate data.
-data Block = Block
-  { blockIdx   :: !Vertex
-  , blockStmt  :: !Stmt
-  , blockSuccs :: ![Vertex]
-  } deriving (Show)
+-- | Control flow graph. Edges are to successors. Nodes are labelled with
+-- statements.
+type CFG = GI.Gr Stmt ()
 
 --------------------------------------------------------------------------------
--- Entry and exit nodes are having special treatment in analyses, so define them
--- here.
+-- Entry and exit nodes are having special treatment in analyses, so we define
+-- them here.
 
-entryNode, exitNode, firstNode :: Vertex
+entryNode, exitNode, firstNode :: G.Node
 entryNode = 1
 exitNode  = 0
 firstNode = 2
@@ -52,57 +45,74 @@ firstNode = 2
 
 -- | Generate control flow graph of a function.
 funCFG :: Fun -> CFG
-funCFG fun = CFG graph node_stmts
+funCFG fun = graph
   where
-    cfg_stuff :: [Block]
-    cfg_stuff =
-      Block exitNode Skip [] :
-      evalState (iter entryNode exitNode (funBody fun)) firstNode
+    exit_node :: G.LNode Stmt
+    exit_node = (exitNode, Skip)
 
-    graph :: Graph
-    graph = A.fromAssocs $
-            map (\b -> (blockIdx b, blockSuccs b)) cfg_stuff
-
-    node_stmts :: A.Array Stmt
-    node_stmts = A.fromAssocs $
-                 map (\b -> (blockIdx b, blockStmt b)) cfg_stuff
+    graph :: GI.Gr Stmt ()
+    graph =
+      uncurry G.mkGraph $
+        evalState (iter entryNode exitNode (funBody fun) ([exit_node], [])) firstNode
 
     -- | Given current node index and node index of the continuation, generate
-    -- list of blocks for a statement.
+    -- edges in the graph.
+    --
+    -- Total number of nodes in the graph will be the final state. Nodes indices
+    -- are 0-based.
     iter
-      :: Vertex -- ^ Current vertex
-      -> Vertex -- ^ Continuation
-      -> Stmt   -- ^ Statement of the block
-      -> State Vertex [Block]
+      :: G.Node -- ^ Current node
+      -> G.Node -- ^ Continuation. This should be a node in the accumulator.
+      -> Stmt   -- ^ Statement of current node
+      -> ( [G.LNode Stmt]
+                -- ^ Node accumulator.
+         , [G.LEdge ()]
+                -- ^ Edge accumulator. We don't accumulate edges in the graph
+                -- accumulator because we add edges to non-existing nodes during
+                -- the construction.
+         )
+      -> State G.Node ([G.LNode Stmt], [G.LEdge ()])
 
     -- Assignments and print statement have trivial control flow.
-    iter cur_node cont stmt@(_ := _) = return [Block cur_node stmt [cont]]
-    iter cur_node cont stmt@(_ :*= _) = return [Block cur_node stmt [cont]]
-    iter cur_node cont stmt@(Output _) = return [Block cur_node stmt [cont]]
-    iter cur_node cont stmt@Skip = return [Block cur_node stmt [cont]]
+    iter cur_node cont stmt@(_ := _)   acc = triv cur_node cont stmt acc
+    iter cur_node cont stmt@(_ :*= _)  acc = triv cur_node cont stmt acc
+    iter cur_node cont stmt@(Output _) acc = triv cur_node cont stmt acc
+    iter cur_node cont stmt@Skip       acc = triv cur_node cont stmt acc
 
-    iter cur_node cont (Seq stmt1 stmt2) = do
+    iter cur_node cont (Seq stmt1 stmt2) acc = do
       stmt1_cont <- newBlock
-      blocks1    <- iter cur_node stmt1_cont stmt1
-      blocks2    <- iter stmt1_cont cont stmt2
-      return (blocks1 ++ blocks2)
+      iter cur_node stmt1_cont stmt1 acc >>=
+        iter stmt1_cont cont stmt2
 
-    iter cur_node cont stmt@(If _ stmt1 stmt2) = do
+    iter cur_node cont stmt@(If _ stmt1 stmt2) acc = do
       then_node <- newBlock
       else_node <- newBlock
-      then_blocks <- iter then_node cont stmt1
-      else_blocks <- iter else_node cont stmt2
-      return (Block cur_node stmt [then_node, else_node] : then_blocks ++ else_blocks)
+      (ns, es) <- iter then_node cont stmt1 acc >>=
+                    iter else_node cont stmt2
+      return ( (cur_node, stmt) : ns
+             , (cur_node, then_node, ()) :
+               (cur_node, else_node, ()) :
+               es
+             )
 
-    iter cur_node cont stmt@(While _ body) = do
+    iter cur_node cont stmt@(While _ body) acc = do
       body_node <- newBlock
-      body_blocks <- iter body_node cur_node body
-      return (Block cur_node stmt [body_node, cont] : body_blocks)
+      (ns, es) <- iter body_node cur_node body acc
+      return ( (cur_node, stmt) : ns
+             , (cur_node, body_node, ()) :
+               (cur_node, cont, ()) :
+               es
+             )
+
+    triv cur_node cont stmt (ns, es) =
+      return ( (cur_node, stmt) : ns
+             , (cur_node, cont, ()) : es )
 
     -- | Allocate a new block.
-    newBlock :: State Vertex Vertex
+    newBlock :: State G.Node G.Node
     newBlock = state (\v -> (v, v + 1))
 
+{-
 --------------------------------------------------------------------------------
 
 -- | Concatenate a list of CFGs. Returns first nodes of CFGs in addition to the
@@ -278,3 +288,4 @@ showCFG (CFG graph ss) = unlines (map (uncurry showBlock) (A.assocs ss))
 
 instance Show CFG where
   show = showCFG
+-}
