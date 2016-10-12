@@ -24,14 +24,22 @@ import TIP.Syntax
 data Interv = Interv
   { _low  :: InfInt
   , _high :: InfInt
-  } deriving (Show, Eq)
+  } deriving (Eq)
+
+instance Show Interv where
+  show (Interv low high) = "[" ++ show low ++ ", " ++ show high ++ "]"
 
 -- | Integer with plus and minus ∞ values.
 data InfInt
   = NegInf  -- ^ -∞
   | Integer Integer
   | PosInf  -- ^ +∞
-  deriving (Show, Eq, Ord)
+  deriving (Eq, Ord)
+
+instance Show InfInt where
+  show NegInf = "-∞"
+  show (Integer i) = show i
+  show PosInf = "+∞"
 
 -- | Is the interval empty?
 isEmptyInterv :: Interv -> Bool
