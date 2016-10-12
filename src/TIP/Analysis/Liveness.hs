@@ -25,12 +25,12 @@ livenessAnal fun = mkBkwAnal lat cfg trans
     cfg = funCFG fun
 
     trans join_ cur
-      | cur == exitNode = expVars (funRet fun)
+      | cur == exitNode = S.empty
       | otherwise =
         case cfgNodeStmts cfg ! cur of
           Skip      -> join_
-          var := e   -> S.delete var join_ `S.union` expVars e
-          var :*= e  -> S.delete var join_ `S.union` expVars e
+          var := e  -> S.delete var join_ `S.union` expVars e
+          var :*= e -> S.delete var join_ `S.union` expVars e
           Output e  -> join_ `S.union` expVars e
           Seq{}     -> error "Seq in CFG."
           If e _ _  -> join_ `S.union` expVars e
