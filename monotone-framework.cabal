@@ -33,13 +33,24 @@ library
 
   -- other-modules:
   build-depends:
-    array           >=0.5 && <0.6,
-    base            >=4.9 && <4.10,
-    containers      >=0.5 && <0.6,
-    fgl             >=5.5.3.0 && <5.6,
+    array              >=0.5 && <0.6,
+    base               >=4.9 && <4.10,
+    containers         >=0.5 && <0.6,
+    dotgen,
+    fgl                >=5.5.3.0 && <5.6,
     fgl-visualize,
-    mtl             >=2.2 && <2.3
+    mtl                >=2.2 && <2.3
 
   hs-source-dirs:      src
   default-language:    Haskell2010
+  ghc-options:         -Wall
+
+executable fun-to-dot
+  build-depends:
+    base,
+    dotgen,
+    monotone-framework
+
+  hs-source-dirs:      execs
+  main-is:             FunToDot.hs
   ghc-options:         -Wall

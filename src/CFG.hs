@@ -1,5 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TupleSections #-}
 
 module CFG
@@ -9,6 +7,8 @@ module CFG
   , funCFG
   -- , pgmCFG
   -- , concatCFGs
+
+  , cfgToDot
   ) where
 
 --------------------------------------------------------------------------------
@@ -16,12 +16,14 @@ module CFG
 import Control.Monad (forM)
 import Control.Monad.State.Strict (State, evalState, state)
 import Control.Monad.Writer (WriterT, runWriterT, tell)
-import qualified Data.Map as M
 import Data.Bifunctor (first)
+import qualified Data.Map as M
 import qualified Data.Set as S
 
 import qualified Data.Graph.Inductive as G
+import Data.Graph.Inductive.Dot (fglToDotString)
 import qualified Data.Graph.Inductive.PatriciaTree as GI
+import Text.Dot (Dot)
 
 import TIP.Syntax
 import Utils
@@ -289,3 +291,6 @@ showCFG (CFG graph ss) = unlines (map (uncurry showBlock) (A.assocs ss))
 instance Show CFG where
   show = showCFG
 -}
+
+cfgToDot :: CFG -> Dot ()
+cfgToDot = fglToDotString . G.nemap show (const "")
