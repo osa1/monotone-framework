@@ -23,7 +23,7 @@ ite = Fun
           , "n" := Binop "n" Minus (Int 1)
           ]
       ]
-  , funRet    = Var "f"
+  , funRet    = "f"
   }
 
 rec :: Fun
@@ -77,16 +77,19 @@ bar = Fun
 main' = Fun
   { funName   = "main"
   , funArgs   = []
-  , funLocals = ["n"]
-  , funBody   = "n" := Input
-  , funRet    = FunCall "foo" [AddrOf "n", "foo"]
+  , funLocals = ["n", "ret"]
+  , funBody   = stmts $
+      [ "n" := Input
+      , "ret" := FunCall "foo" [AddrOf "n", "foo"]
+      ]
+  , funRet    = "ret"
   }
 
 livenessExample :: Fun
 livenessExample = Fun
   { funName = "le"
   , funArgs = []
-  , funLocals = ["x", "y", "z"]
+  , funLocals = ["x", "y", "z", "ret"]
   , funBody = stmts
       [ "x" := Input -- 1
       , While (Binop "x" Gt (Int 1)) $ stmts -- 2
@@ -101,15 +104,16 @@ livenessExample = Fun
           , "z" := Binop "z" Minus (Int 1) -- 11
           ]
       , Output "x" -- 12
+      , "ret" := Null
       ]
-  , funRet = Null
+  , funRet = "ret"
   }
 
 availExprExample :: Fun
 availExprExample = Fun
   { funName = "ae_test"
   , funArgs = []
-  , funLocals = ["x", "y", "z", "a", "b"]
+  , funLocals = ["x", "y", "z", "a", "b", "ret"]
   , funBody = stmts
       [ "z" := Binop "a" Plus "b"
       , "y" := Binop "a" Mult "b"
@@ -117,15 +121,16 @@ availExprExample = Fun
           [ "a" := Binop "a" Plus (Int 1)
           , "x" := Binop "a" Plus "b"
           ]
+      , "ret" := Null
       ]
-  , funRet = Null
+  , funRet = "ret"
   }
 
 veryBusyExprExample :: Fun
 veryBusyExprExample = Fun
   { funName = ""
   , funArgs = []
-  , funLocals = ["x", "a", "b"]
+  , funLocals = ["x", "a", "b", "ret"]
   , funBody = stmts
       [ "x" := Input
       , "a" := Binop "x" Minus (Int 1)
@@ -135,15 +140,16 @@ veryBusyExprExample = Fun
           , "x" := Binop "x" Minus (Int 1)
           ]
       , Output (Binop "a" Mult "b")
+      , "ret" := Null
       ]
-  , funRet = Null
+  , funRet = "ret"
   }
 
 constPropExample :: Fun
 constPropExample = Fun
   { funName = ""
   , funArgs = []
-  , funLocals = ["x", "y", "z"]
+  , funLocals = ["x", "y", "z", "ret"]
   , funBody = stmts
       [ "x" := Int 27
       , "y" := Input
@@ -152,15 +158,16 @@ constPropExample = Fun
            ("y" := Binop "z" Minus (Int 3))
            ("y" := Int 12)
       , Output "y"
+      , "ret" := Null
       ]
-  , funRet = Null
+  , funRet = "ret"
   }
 
 intAnalExample :: Fun
 intAnalExample = Fun
   { funName = ""
   , funArgs = []
-  , funLocals = ["x", "y"]
+  , funLocals = ["x", "y", "ret"]
   , funBody = stmts
       [ "y" := Int 0 -- 1
       , "x" := Int 7 -- 2
@@ -170,15 +177,16 @@ intAnalExample = Fun
           , "x" := Binop "x" Plus (Int 1) -- 6
           , "y" := Binop "y" Plus (Int 1) -- 7
           ]
+      , "ret" := Null
       ]
-  , funRet = Null
+  , funRet = "ret"
   }
 
 pathSensitivityExample :: Fun
 pathSensitivityExample = Fun
   { funName = ""
   , funArgs = []
-  , funLocals = ["x", "y", "z"]
+  , funLocals = ["x", "y", "z", "ret"]
   , funBody = stmts
       [ "x" := Input -- 1
       , "y" := Int 0 -- 2
@@ -190,8 +198,9 @@ pathSensitivityExample = Fun
                Skip -- 8
           , "x" := Binop "x" Minus (Int 1) -- 9
           ]
+      , "ret" := Null
       ]
-  , funRet = Null
+  , funRet = "ret"
   }
 
 --------------------------------------------------------------------------------
@@ -207,9 +216,7 @@ allExamples =
 
 --------------------------------------------------------------------------------
 
-{-
 runExample :: Eq ret => Fun -> (Fun -> FlowAnalysis ret) -> ([ret] -> String) -> IO ()
 runExample fun anal toStr = do
     putStrLn (show (funCFG fun))
     putStrLn (toStr (solve (anal fun)))
--}

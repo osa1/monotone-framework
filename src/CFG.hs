@@ -3,12 +3,10 @@
 module CFG
   ( CFG (..)
   , entryNode, exitNode
-  -- , connectCFGs
   , funCFG
   , multiFunCFG
-  -- , pgmCFG
-  -- , concatCFGs
-
+  , introFunTemps
+  , insertCallStmts
   , cfgToDot
   ) where
 
@@ -17,7 +15,6 @@ module CFG
 import Control.Monad (forM)
 import Control.Monad.State.Strict (State, evalState, state)
 import Control.Monad.Writer (WriterT, runWriterT, tell)
-import Data.Bifunctor (first)
 import Data.List (foldl')
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -29,6 +26,8 @@ import Text.Dot (Dot)
 
 import TIP.Syntax
 import Utils
+
+import Prelude hiding (succ)
 
 --------------------------------------------------------------------------------
 
@@ -59,6 +58,7 @@ firstNode = 2
 funCFG :: Fun -> CFG
 funCFG fun = CFG graph (M.singleton (funName fun) 0)
   where
+    -- Exit node returns from the function
     exit_node :: G.LNode Stmt
     exit_node = (exitNode, Skip)
 
@@ -82,6 +82,10 @@ funCFG fun = CFG graph (M.singleton (funName fun) 0)
          )
       -> State G.Node ([G.LNode Stmt], [G.LEdge ()])
 
+    -- Call and Ret nodes are added after CFG is constructed
+    iter _ _ Call{} _ = error "funCFG: Found Call statement"
+    iter _ _ Ret{}  _ = error "funCFG: Found Ret statement"
+
     -- Assignments and print statement have trivial control flow.
     iter cur_node cont stmt@(_ := _)   acc = triv cur_node cont stmt acc
     iter cur_node cont stmt@(_ :*= _)  acc = triv cur_node cont stmt acc
@@ -93,21 +97,21 @@ funCFG fun = CFG graph (M.singleton (funName fun) 0)
       iter cur_node stmt1_cont stmt1 acc >>=
         iter stmt1_cont cont stmt2
 
-    iter cur_node cont stmt@(If _ stmt1 stmt2) acc = do
+    iter cur_node cont (If cond stmt1 stmt2) acc = do
       then_node <- newBlock
       else_node <- newBlock
       (ns, es) <- iter then_node cont stmt1 acc >>=
                     iter else_node cont stmt2
-      return ( (cur_node, stmt) : ns
+      return ( (cur_node, If cond Skip Skip) : ns
              , (cur_node, then_node, ()) :
                (cur_node, else_node, ()) :
                es
              )
 
-    iter cur_node cont stmt@(While _ body) acc = do
+    iter cur_node cont (While cond body) acc = do
       body_node <- newBlock
       (ns, es) <- iter body_node cur_node body acc
-      return ( (cur_node, stmt) : ns
+      return ( (cur_node, While cond Skip) : ns
              , (cur_node, body_node, ()) :
                (cur_node, cont, ()) :
                es
@@ -145,87 +149,56 @@ multiFunCFG funs = foldl' iter emptyCFG fun_graphs
             , cfgFunExits = M.insert (funName fun) cur_size (cfgFunExits cur_cfg)
             }
 
-{-
--- | Concatenate a list of CFGs. Returns first nodes of CFGs in addition to the
--- combined CFG.
-concatCFGs :: [(Id, CFG)] -> (CFG, [(Id, Int)])
-concatCFGs cfgs =
-    -- Just concatenate graph arrays and update indices, so that edges still
-    -- point to right nodes.
-    (CFG (A.fromList (concat graphs)) (A.fromList (concat stmts)), idxs)
+-- | Insert  `Call` and `Ret` statements for interprocedural analysis.
+--
+-- This should be called after `introFunTemps` as it only looks for function
+-- calls in form `id := f(...)`.
+insertCallStmts :: CFG -> CFG
+insertCallStmts cfg@(CFG graph funs) = cfg{ cfgGraph = go (G.nodes graph) avail_node_0 graph }
   where
-    (idxs, graphs, stmts) = unzip3 (concat_cfgs 0 cfgs)
+    -- first available node slot in the CFG
+    avail_node_0 = snd (G.nodeRange graph) + 1
 
-    concat_cfgs _ [] = []
-    concat_cfgs !cur_idx ((fun_id, CFG graph ss) : rest) =
-      ( (fun_id, cur_idx),  map (map (+ cur_idx)) (A.toList graph), A.toList ss )
-        : concat_cfgs (cur_idx + A.length graph) rest
+    go :: G.DynGraph gr => [G.Node] -> G.Node -> gr Stmt () -> gr Stmt ()
+    go []       _         gr = gr
+    go (n : ns) free_node gr =
+      let
+        (_, _, stmt, succs) = G.context gr n
+      in
+        case stmt of
+          ret_id := FunCall (Var fun_id) args
 
--- | Final CFG will have all vertices in both CFGs. Edges will be added to given
--- vertices.
-connectCFGs
-  :: CFG
-       -- ^ CFG that makes the jump.
-  -> Vertex
-      -- ^ The node that makes the jump. This node will have an outgoing edge to
-      -- the other CFG's entry node.
-  -> Vertex
-      -- ^ Where to return after the other CFG. This node will have an incoming
-      -- edge from other CFG's exit node.
-  -> CFG
-      -- ^ The CFG to connect.
-  -> CFG
+            | Just callee_exit <- M.lookup fun_id funs
+            , [((), succ)] <- succs
+            -> let
+                 -- 1. Current node becomes a Call node with successors to
+                 --    functions.
+                 --
+                 -- 2. We add a new "Ret" node with a successor to current
+                 --    node's successor.
+                 --
+                 -- 3. Callee's exit gets a new successor to this "Ret" node.
 
--- NOTE: This function relies on the fact that exit node is first node in graph,
--- and entry node is second.
+                 -- entry node of the callee
+                 callee_entry = callee_exit + 1
 
-connectCFGs cfg_from jump ret cfg_to =
-    CFG new_cfg new_stmt_arr
-  where
-    cfg_from_size = A.length (cfgGraph cfg_from)
+                 gr' =
+                   G.insEdge (callee_exit, free_node, ()) $
+                   G.insEdge (free_node, succ, ()) $
+                   G.insNode (free_node, Ret ret_id) $
+                   (G.&) ([], n, Call args, [((), callee_entry)]) $
+                   G.delEdge (n, succ) $
+                   gr
+               in
+                 go ns (free_node + 1) gr'
 
-    -- jump target after node arrays are concatenated
-    to_cfg_entry = cfg_from_size + 1
-
-    -- update edges of cfg_to
-    cfg_to_graph_updated =
-      case map (map (+ cfg_from_size)) (A.toList (cfgGraph cfg_to)) of
-        old_exit : rest -> (ret : old_exit) : rest
-        _               -> error "connectCFGs: to CFG doesn't have enough nodes"
-
-    -- update edges of cfg_from
-    cfg_from_graph_updated =
-      map (\(vtx, out_edges) -> if vtx == jump then to_cfg_entry : out_edges else out_edges)
-          (A.assocs (cfgGraph cfg_from))
-
-    -- new graph
-    new_cfg =
-      A.fromList (cfg_from_graph_updated ++ cfg_to_graph_updated)
-
-    -- new statement array
-    new_stmt_arr =
-      A.fromList (A.toList (cfgNodeStmts cfg_from) ++ A.toList (cfgNodeStmts cfg_to))
+          _ -> go ns free_node gr
 
 --------------------------------------------------------------------------------
 
--- | Build a CFG with edges between functions, for interprocedural analysis.
--- Note that if a call target can't be resolved during CFG construction (e.g.
--- because of function pointers) there won't be an edge in call statement, and
--- some functions in the map may not be used at all.
---
--- A pre-processing step introduces temporaries for function calls.
-pgmCFG :: M.Map Id Fun -> Id -> CFG
-pgmCFG (introFunTemps -> funs) main =
-    -- an internal state keeps track of functions that are merged to the main
-    -- CFG
-    undefined -- TODO: We need efficient graph updates here.
-  where
-    fun_cfgs = M.map funCFG funs
-    combined_cfg = concatCFGs (M.toList fun_cfgs)
-
 -- | Introduce temporaries to bind function call results. After this pass
 -- function calls only appear in assignment right-hand sides.
-introFunTemps :: M.Map Id Fun -> M.Map Id Fun
+introFunTemps :: Traversable t => t Fun -> t Fun
 introFunTemps funs  =
     flip evalState 0 $
       forM funs $ \fun -> do
@@ -271,6 +244,9 @@ introFunTemps funs  =
       s' <- intro_temps s
       return (s0 `seqs` While e' s')
 
+    intro_temps Call{} = error "introFunTemps: Found Call statement"
+    intro_temps Ret{}  = error "introFunTemps: Found Ret statement"
+
     intro_temps_e :: Exp -> WriterT (S.Set Id) (State Int) (Stmt, Exp)
 
     intro_temps_e e@Int{} = return (Skip, e)
@@ -310,16 +286,19 @@ introFunTemps funs  =
 --------------------------------------------------------------------------------
 
 showCFG :: CFG -> String
-showCFG (CFG graph ss) = unlines (map (uncurry showBlock) (A.assocs ss))
+showCFG (CFG graph _) = unlines (map (showBlock . fst) (G.labNodes graph))
   where
-    showBlock :: Int -> Stmt -> String
-    showBlock node stmt =
-      let succs = graph A.! node
-       in span_right 2 (show node) ++ ": " ++ show stmt ++ " (succs: " ++ show succs ++ ")"
+    showBlock :: G.Node -> String
+    showBlock node =
+      let
+        (preds, _, stmt, succs) = G.context graph node
+      in
+        span_right 2 (show node) ++
+           ": " ++ show stmt ++ " (preds: " ++ show (map snd preds) ++ ") (sucss: " ++
+           show (map snd succs) ++ ")"
 
 instance Show CFG where
   show = showCFG
--}
 
 cfgToDot :: CFG -> Dot ()
 cfgToDot = fglToDotString . G.nemap show (const "") . cfgGraph
