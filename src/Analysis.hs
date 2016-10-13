@@ -52,7 +52,7 @@ mkFwdAnal lat cfg trans = FlowAnalysis
   where
     constr_gen node ls =
       let
-        preds     = G.pre' (G.context cfg node)
+        preds     = G.pre' (G.context (cfgGraph cfg) node)
         pred_lats = map (ls !!) preds
         join_     = foldl' (join lat) (bottom lat) pred_lats
       in
@@ -72,7 +72,7 @@ mkBkwAnal lat cfg trans = FlowAnalysis
   where
     constr_gen node ls =
       let
-        succs     = G.suc' (G.context cfg node)
+        succs     = G.suc' (G.context (cfgGraph cfg) node)
         succ_lats = map (ls !!) succs
         join_     = foldl' (join lat) (bottom lat) succ_lats
       in
@@ -88,7 +88,7 @@ solve flowAnal =
   where
     l0  = replicate (length nodes) (bottom (lattice flowAnal))
 
-    nodes = map fst (G.labNodes (flowGraph flowAnal))
+    nodes = map fst (G.labNodes (cfgGraph (flowGraph flowAnal)))
     constrs = map (constraintGen flowAnal) nodes
 
     -- This is what's called "combined function F : L^n -> L^n" in Chapter 5.

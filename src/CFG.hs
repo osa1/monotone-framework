@@ -5,6 +5,7 @@ module CFG
   , entryNode, exitNode
   -- , connectCFGs
   , funCFG
+  , multiFunCFG
   -- , pgmCFG
   -- , concatCFGs
 
@@ -17,6 +18,7 @@ import Control.Monad (forM)
 import Control.Monad.State.Strict (State, evalState, state)
 import Control.Monad.Writer (WriterT, runWriterT, tell)
 import Data.Bifunctor (first)
+import Data.List (foldl')
 import qualified Data.Map as M
 import qualified Data.Set as S
 
@@ -32,7 +34,15 @@ import Utils
 
 -- | Control flow graph. Edges are to successors. Nodes are labelled with
 -- statements.
-type CFG = GI.Gr Stmt ()
+data CFG = CFG
+  { cfgGraph    :: GI.Gr Stmt ()
+      -- ^ The actual graph
+  , cfgFunExits :: M.Map Id G.Node
+      -- ^ Exit nodes of functions in the CFG. Entry node is exit node + 1.
+  }
+
+emptyCFG :: CFG
+emptyCFG = CFG G.empty M.empty
 
 --------------------------------------------------------------------------------
 -- Entry and exit nodes are having special treatment in analyses, so we define
@@ -45,9 +55,9 @@ firstNode = 2
 
 --------------------------------------------------------------------------------
 
--- | Generate control flow graph of a function.
+-- | Generate control flow graph of a single function.
 funCFG :: Fun -> CFG
-funCFG fun = graph
+funCFG fun = CFG graph (M.singleton (funName fun) 0)
   where
     exit_node :: G.LNode Stmt
     exit_node = (exitNode, Skip)
@@ -58,10 +68,7 @@ funCFG fun = graph
         evalState (iter entryNode exitNode (funBody fun) ([exit_node], [])) firstNode
 
     -- | Given current node index and node index of the continuation, generate
-    -- edges in the graph.
-    --
-    -- Total number of nodes in the graph will be the final state. Nodes indices
-    -- are 0-based.
+    -- graph nodes and edges of the control flow graph.
     iter
       :: G.Node -- ^ Current node
       -> G.Node -- ^ Continuation. This should be a node in the accumulator.
@@ -114,9 +121,31 @@ funCFG fun = graph
     newBlock :: State G.Node G.Node
     newBlock = state (\v -> (v, v + 1))
 
-{-
 --------------------------------------------------------------------------------
 
+-- | Generate a CFG for a list of functions. Graph nodes of functions won't be
+-- connected.
+multiFunCFG :: [Fun] -> CFG
+multiFunCFG funs = foldl' iter emptyCFG fun_graphs
+  where
+    fun_graphs :: [(Fun, GI.Gr Stmt ())]
+    fun_graphs = map (\fun -> (fun, cfgGraph (funCFG fun))) funs
+
+    iter :: CFG -> (Fun, GI.Gr Stmt ()) -> CFG
+    iter cur_cfg (fun, fun_graph) =
+      let
+        cur_graph   = cfgGraph cur_cfg
+        cur_size    = G.noNodes cur_graph
+        nodes_added = foldl' (\g (node, lbl) -> G.insNode (node + cur_size, lbl) g)
+                             cur_graph (G.labNodes fun_graph)
+        edges_added = foldl' (\g (from, to, lbl) -> G.insEdge (from + cur_size, to + cur_size, lbl) g)
+                             nodes_added (G.labEdges fun_graph)
+      in
+        CFG { cfgGraph = edges_added
+            , cfgFunExits = M.insert (funName fun) cur_size (cfgFunExits cur_cfg)
+            }
+
+{-
 -- | Concatenate a list of CFGs. Returns first nodes of CFGs in addition to the
 -- combined CFG.
 concatCFGs :: [(Id, CFG)] -> (CFG, [(Id, Int)])
@@ -293,4 +322,4 @@ instance Show CFG where
 -}
 
 cfgToDot :: CFG -> Dot ()
-cfgToDot = fglToDotString . G.nemap show (const "")
+cfgToDot = fglToDotString . G.nemap show (const "") . cfgGraph

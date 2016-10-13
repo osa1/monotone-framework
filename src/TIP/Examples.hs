@@ -207,7 +207,9 @@ allExamples =
 
 --------------------------------------------------------------------------------
 
+{-
 runExample :: Eq ret => Fun -> (Fun -> FlowAnalysis ret) -> ([ret] -> String) -> IO ()
 runExample fun anal toStr = do
     putStrLn (show (funCFG fun))
     putStrLn (toStr (solve (anal fun)))
+-}

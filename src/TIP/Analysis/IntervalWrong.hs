@@ -183,7 +183,7 @@ intAnal fun = mkFwdAnal lat cfg trans
     cfg = funCFG fun
 
     trans join_ cur =
-      case G.lab' (G.context cfg cur) of
+      case G.lab' (G.context (cfgGraph cfg) cur) of
         var := rhs -> M.insert var (eval join_ rhs) join_
         Seq{}      -> error "Seq in CFG."
         _          -> join_

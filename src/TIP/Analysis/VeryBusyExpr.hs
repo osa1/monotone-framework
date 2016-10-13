@@ -27,7 +27,7 @@ veryBusyExprAnal fun = mkBkwAnal lat cfg trans
     trans join_ cur
       | cur == exitNode = S.empty
       | otherwise =
-        case G.lab' (G.context cfg cur) of
+        case G.lab' (G.context (cfgGraph cfg) cur) of
           Skip      -> join_
           x := e    -> removeReferencing join_ x `S.union` subExps e
           x :*= e   -> removeReferencing join_ x `S.union` subExps e

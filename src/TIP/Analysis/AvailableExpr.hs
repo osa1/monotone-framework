@@ -29,7 +29,7 @@ availExprAnal fun = mkFwdAnal lat cfg trans
     trans join_ cur
       | cur == entryNode = S.empty
       | otherwise =
-        case G.lab' (G.context cfg cur) of
+        case G.lab' (G.context (cfgGraph cfg) cur) of
           Skip      -> join_
           x := e    -> removeReferencing (join_ `S.union` subExps e) x
           x :*= e   -> removeReferencing (join_ `S.union` subExps e) x
