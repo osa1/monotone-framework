@@ -1,3 +1,5 @@
+-- | An expression is very busy is it will definitely be evaluated again before
+-- its value changes.
 module TIP.Analysis.VeryBusyExpr where
 
 --------------------------------------------------------------------------------

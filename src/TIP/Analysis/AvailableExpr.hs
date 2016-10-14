@@ -1,3 +1,6 @@
+-- | An expression is available at a program point if its value has already been
+-- computed earlier in the execution. These expression can be given a name to
+-- avoid repeated evaluations.
 module TIP.Analysis.AvailableExpr where
 
 --------------------------------------------------------------------------------
