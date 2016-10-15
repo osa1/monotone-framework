@@ -9,8 +9,6 @@ import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.List (foldl')
 
-import SemiLattice
-
 import Prelude hiding (lookup)
 
 --------------------------------------------------------------------------------
