@@ -1,10 +1,17 @@
+{-# LANGUAGE LambdaCase    #-}
+{-# LANGUAGE TupleSections #-}
+
 -- | 0-CFA as desribed in "Principles of Program Analysis" chapter 3.
 module CFA.ZeroCFA where
 
 --------------------------------------------------------------------------------
 
+import Data.Bits (shiftL, (.|.))
+import qualified Data.Graph.Inductive.Graph as G
+import qualified Data.Graph.Inductive.PatriciaTree as G
 import Data.List (foldl')
 import qualified Data.Map as M
+import Data.Maybe (fromJust)
 import qualified Data.Set as S
 
 import Prelude hiding (lookup)
@@ -23,7 +30,7 @@ newtype Var = Var { varInt :: Int }
   deriving (Show, Eq, Ord)
 
 data Term
-  = C Const
+  = Con Const
   | X Var
   | Fn Var Exp
   | Fix Var Var Exp
@@ -43,7 +50,7 @@ fvExp :: Exp -> S.Set Var
 fvExp = fvTerm . expTerm
 
 fvTerm :: Term -> S.Set Var
-fvTerm C{}             = S.empty
+fvTerm Con{}           = S.empty
 fvTerm (X v)           = S.singleton v
 fvTerm (Fn x e)        = S.delete x (fvExp e)
 fvTerm (Fix f x e)     = S.delete f (S.delete x (fvExp e))
@@ -51,6 +58,32 @@ fvTerm (App e1 e2)     = fvExp e1 `S.union` fvExp e2
 fvTerm (If e1 e2 e3)   = fvExp e1 `S.union` fvExp e2 `S.union` fvExp e3
 fvTerm (Let x e1 e2)   = fvExp e1 `S.union` S.delete x (fvExp e2)
 fvTerm (Binop e1 _ e2) = fvExp e1 `S.union` fvExp e2
+
+labelsExp :: Exp -> S.Set Label
+labelsExp e = S.insert (expLbl e) (labelsTerm (expTerm e))
+
+labelsTerm :: Term -> S.Set Label
+labelsTerm Con{} = S.empty
+labelsTerm X{} = S.empty
+labelsTerm (Fn _ e) = labelsExp e
+labelsTerm (Fix _ _ e) = labelsExp e
+labelsTerm (App e1 e2) = labelsExp e1 `S.union` labelsExp e2
+labelsTerm (If e1 e2 e3) = labelsExp e1 `S.union` labelsExp e2 `S.union` labelsExp e3
+labelsTerm (Let _ e1 e2) = labelsExp e1 `S.union` labelsExp e2
+labelsTerm (Binop e1 _ e2) = labelsExp e1 `S.union` labelsExp e2
+
+varsExp :: Exp -> S.Set Var
+varsExp = varsTerm . expTerm
+
+varsTerm :: Term -> S.Set Var
+varsTerm Con{} = S.empty
+varsTerm (X v) = S.singleton v
+varsTerm (Fn v e) = S.insert v (varsExp e)
+varsTerm (Fix v1 v2 e) = S.insert v1 (S.insert v2 (varsExp e))
+varsTerm (App e1 e2) = varsExp e1 `S.union` varsExp e2
+varsTerm (If e1 e2 e3) = varsExp e1 `S.union` varsExp e2 `S.union` varsExp e3
+varsTerm (Let v e1 e2) = S.insert v (varsExp e1 `S.union` varsExp e2)
+varsTerm (Binop e1 _ e2) = varsExp e1 `S.union` varsExp e2
 
 -- Result of a 0-CFA analysis is a pair
 --
@@ -81,7 +114,7 @@ data CFA = CFA
 -- The goal is to come up with a minimal CFA that satisfies this relation.
 acceptable :: CFA -> Exp -> Bool
 
-CFA _     _   `acceptable` Exp C{}     _ = True
+CFA _     _   `acceptable` Exp Con{}   _ = True
 CFA cache env `acceptable` Exp (X var) l = lookup var env `S.isSubsetOf` lookup l cache
 
 -- Note that we don't want bodies of functions to be acceptable here. The idea
@@ -144,27 +177,23 @@ CFA c1 e1 `lt` CFA c2 e2 =
 --------------------------------------------------------------------------------
 -- * Constraint-Based 0-CFA Analysis (Chapter 3.4)
 
+data P
+  = C Label
+      -- ^ Cache value of label
+  | R Var
+      -- ^ Env value of var
+  deriving (Show, Eq, Ord)
+
 -- | Constraints
 data Constr
-  = Subset LHS RHS
+  = Subset (Either AbsTerm P) P
       -- ^ lhs <= rhs
-  | Cond AbsTerm RHS LHS RHS
+  | Cond AbsTerm P P P
       -- ^ ({t} <= rhs0) => (lhs <= rhs1)
   deriving (Show, Eq, Ord)
 
-data LHS
-  = CacheOfL Label
-  | EnvOfL Var
-  | SingletonL AbsTerm
-  deriving (Show, Eq, Ord)
-
-data RHS
-  = CacheOfR Label
-  | EnvOfR Var
-  deriving (Show, Eq, Ord)
-
 absTerms :: Term -> S.Set AbsTerm
-absTerms C{} = S.empty
+absTerms Con{} = S.empty
 absTerms X{} = S.empty
 absTerms (Fn x e) = S.singleton (AbsFn x e)
 absTerms (Fix f x e) = S.singleton (AbsFix f x e)
@@ -176,44 +205,44 @@ absTerms (Binop e1 _ e2) = absTerms (expTerm e1) `S.union` absTerms (expTerm e2)
 -- | Table 3.6
 constrGen :: Exp -> S.Set AbsTerm -> S.Set Constr
 
-constrGen (Exp C{} _) _ =
+constrGen (Exp Con{} _) _ =
     S.empty
 
 constrGen (Exp (X x) l) _ =
-    S.singleton (EnvOfL x `Subset` CacheOfR l)
+    S.singleton (Right (R x) `Subset` C l)
 
 constrGen (Exp (Fn x e) l) ts =
-    S.insert (SingletonL (AbsFn x e) `Subset` CacheOfR l) $
+    S.insert (Left (AbsFn x e) `Subset` C l) $
     constrGen e ts
 
 constrGen (Exp (Fix f x e) l) ts =
-    S.insert (SingletonL (AbsFix f x e) `Subset` CacheOfR l) $
-    S.insert (SingletonL (AbsFix f x e) `Subset` EnvOfR f) $
+    S.insert (Left (AbsFix f x e) `Subset` C l) $
+    S.insert (Left (AbsFix f x e) `Subset` R f) $
     constrGen e ts
 
 constrGen (Exp (App e1 e2) l) ts = S.unions
   [ constrGen e1 ts
   , constrGen e2 ts
-  , S.fromList [ Cond t (CacheOfR (expLbl e1)) (CacheOfL (expLbl e2)) (EnvOfR x)
+  , S.fromList [ Cond t (C (expLbl e1)) (C (expLbl e2)) (R x)
                | t@(AbsFn x _) <- S.toList ts ]
-  , S.fromList [ Cond t (CacheOfR (expLbl e1)) (CacheOfL (expLbl e0)) (CacheOfR l)
+  , S.fromList [ Cond t (C (expLbl e1)) (C (expLbl e0)) (C l)
                | t@(AbsFn _ e0) <- S.toList ts ]
-  , S.fromList [ Cond t (CacheOfR (expLbl e1)) (CacheOfL (expLbl e2)) (EnvOfR x)
+  , S.fromList [ Cond t (C (expLbl e1)) (C (expLbl e2)) (R x)
                | t@(AbsFix _ x _) <- S.toList ts ]
-  , S.fromList [ Cond t (CacheOfR (expLbl e1)) (CacheOfL (expLbl e0)) (CacheOfR l)
+  , S.fromList [ Cond t (C (expLbl e1)) (C (expLbl e0)) (C l)
                | t@(AbsFix _ _ e0) <- S.toList ts ]
   ]
 
 constrGen (Exp (If e0 e1 e2) l) ts =
-    S.insert (CacheOfL (expLbl e1) `Subset` CacheOfR l) $
-    S.insert (CacheOfL (expLbl e2) `Subset` CacheOfR l) $
+    S.insert (Right (C (expLbl e1)) `Subset` C l) $
+    S.insert (Right (C (expLbl e2)) `Subset` C l) $
     S.union (constrGen e0 ts) $
     S.union (constrGen e1 ts) $
     constrGen e2 ts
 
 constrGen (Exp (Let x e1 e2) l) ts =
-    S.insert (CacheOfL (expLbl e1) `Subset` EnvOfR x) $
-    S.insert (CacheOfL (expLbl e2) `Subset` CacheOfR l) $
+    S.insert (Right (C (expLbl e1)) `Subset` R x) $
+    S.insert (Right (C (expLbl e2)) `Subset` C l) $
     S.union (constrGen e1 ts) $
     constrGen e2 ts
 
@@ -233,7 +262,7 @@ fixpoint e = loop cfa0
       where
         next = f_star cfa
 
-    constrs :: [(Ls, RHS)]
+    constrs :: [(Ls, P)]
     constrs = map toLs (S.toList (constrGen e (absTerms (expTerm e))))
 
     f_star :: (Cache, Env) -> (Cache, Env)
@@ -242,40 +271,207 @@ fixpoint e = loop cfa0
     f1 :: (Cache, Env) -> Cache
     f1 (cache0, env) = foldl' f1' cache0 constrs
       where
-        f1' :: Cache -> (Ls, RHS) -> Cache
-        f1' cache (ls, CacheOfR l) = alterSet (eval (cache, env) ls) l cache
-        f1' cache (_,  EnvOfR{})   = cache
+        f1' :: Cache -> (Ls, P) -> Cache
+        f1' cache (ls, C l) = alterSet (eval (cache, env) ls) l cache
+        f1' cache (_,  R{}) = cache
 
     f2 :: (Cache, Env) -> Env
     f2 (cache, env0) = foldl' f2' env0 constrs
       where
-        f2' :: Env -> (Ls, RHS) -> Env
-        f2' env (_,  CacheOfR{}) = env
-        f2' env (ls, EnvOfR x)   = alterSet (eval (cache, env) ls) x env
+        f2' :: Env -> (Ls, P) -> Env
+        f2' env (_,  C{}) = env
+        f2' env (ls, R x) = alterSet (eval (cache, env) ls) x env
 
 data Ls
-  = LhsLs LHS
-  | CondLs AbsTerm RHS LHS
-      -- ^ ({t} <= rhs) => lhs
+  = LhsLs (Either AbsTerm P)
+  | CondLs AbsTerm P P
+      -- ^ ({t} <= p1) => p2
 
-toLs :: Constr -> (Ls, RHS)
+toLs :: Constr -> (Ls, P)
 toLs (Subset lhs rhs)       = (LhsLs lhs, rhs)
 toLs (Cond t rhs0 lhs rhs1) = (CondLs t rhs0 lhs, rhs1)
 
 -- Defined in 3.4.1
 eval :: (Cache, Env) -> Ls -> AbsVal
-eval (cache, _  ) (LhsLs (CacheOfL l))   = lookup l cache
-eval (_,     env) (LhsLs (EnvOfL x))     = lookup x env
-eval (_,     _  ) (LhsLs (SingletonL t)) = S.singleton t
+eval (cache, _  ) (LhsLs (Right (C l))) = lookup l cache
+eval (_,     env) (LhsLs (Right (R x))) = lookup x env
+eval (_,     _  ) (LhsLs (Left t))      = S.singleton t
 eval (cache, env) (CondLs t rhs lhs)
   | t `S.member` eval (cache, env) (rhsToLs rhs)
-  = eval (cache, env) (LhsLs lhs)
+  = eval (cache, env) (LhsLs (Right lhs))
   | otherwise
   = S.empty
 
-rhsToLs :: RHS -> Ls
-rhsToLs (CacheOfR l) = LhsLs (CacheOfL l)
-rhsToLs (EnvOfR x)   = LhsLs (EnvOfL x)
+rhsToLs :: P -> Ls
+rhsToLs (C l) = LhsLs (Right (C l))
+rhsToLs (R x) = LhsLs (Right (R x))
+
+-- | Table 3.7, graph-based O(n^3) constraint solver.
+--
+-- (even though we work on constraints, `n` here is the number of terms.
+-- TODO: write about this is so)
+--
+-- Here's how this works, in my own words (make sure to look at Table 3.7
+-- too):
+--
+-- * The graph has a node for every C(l) and r(x). More precisely, for every
+--   location 'l' in program we add a node C(l) and for every variable 'x' in the
+--   program we add a node r(x).
+--
+-- * Nodes are annotated with a set of abstract values. These are the values
+--   that "flow into" the location (if node is C(l) for a location l) or variable
+--   (if node is r(x) for a variable x).
+--
+--   In my implementation I use a mapping from nodes (typed 'P') to these sets.
+--   Initially these sets are empty.
+--
+-- * Edges are annotated with constraints that gave rise to them.
+--
+-- * We maintain a workset ('W') of Ps. Initially empty.
+--
+-- * Adding edges: We consider constraints.
+--
+--     - {t} <= p: We do nothing if `t` is already in the abstract value set of
+--       `p` (remember that `p` is either C(l) for some l or r(x) for some x).
+--       Otherwise we add `t` to `p`s abstract value set, and we add `p` to the
+--       workset.
+--
+--     - p1 <= p2: We add an edge from `p1` to `p2`, we annotate the edge with
+--       the constraint itself.
+--
+--     - {t} <= p => p1 <= p2: We add an edge from `p1` to `p2` and `p` to `p2`.
+--       both edges are annotated with this constraint.
+--
+-- * Main loop: Until the workset is empty, fetch a node from the workset.
+--
+--     - The node has constraint `p1 <= p2`. Add abstract values of p1 to p2. If
+--       any new values were added, add p2 to the workset.
+--
+--     - The node has constraint `{t} <= p => p1 <= p2`. If `t` is in the
+--       abstract value set of p, add abstract values of p1 to p2. If any new
+--       values were added, add p2 to the workset.
+--
+-- Initially in the workset we only have location nodes (C(l)) with abstract
+-- values. These are basically nodes for lambdas (if we had non-functions
+-- abstract values, e.g. integers, we'd add nodes with integer constants to the
+-- set too).
+--
+-- We start popping nodes from the workset, and consider outgoing edges of the
+-- node. If we can "propagate" an abstract value from current node to one of the
+-- neighbors, then we do it, and then add the neighbor to the workset. However,
+-- if the constraint on the edge is a conditional in form `t <= p => p1 <= p2`,
+-- we check the condition (see if `t` is in the set of `p`) before propagating
+-- the abstract values from `p1` to `p2`.
+--
+solve :: [Label] -> [Var] -> [Constr] -> (Cache, Env)
+solve lbls vs constrs = (cache, env)
+  where
+    d_sol = iter grdw0
+    cache = M.fromList (map (\l -> (l, fromJust (M.lookup (C l) d_sol))) lbls)
+    env   = M.fromList (map (\v -> (v, fromJust (M.lookup (R v) d_sol))) vs)
+
+    iter (gr, d, workset)
+      | Just (work, workset') <- S.minView workset
+      = let
+          work_node = p_node work
+          work_edges = G.out gr work_node
+        in
+          iter $
+          foldl' (\(gr, d, workset) -> \case
+                                         Subset (Right p1) p2 ->
+                                             add (fromJust (M.lookup p1 d)) p2 (gr, d, workset)
+                                         Cond t p p1 p2
+                                           | t `S.member` fromJust (M.lookup p d) ->
+                                             add (fromJust (M.lookup p1 d)) p2 (gr, d, workset)
+                                           | otherwise -> (gr, d, workset))
+                 (gr, d, workset')
+                 (map G.edgeLabel work_edges)
+
+      | otherwise
+      = d
+
+    -- | Nodes of the graph.
+    ps :: [P]
+    ps = map C lbls ++ map R vs
+
+    -- | Initial graph has no edges.
+    g0 :: G.Gr P Constr
+    g0 = G.mkGraph (map (\p -> (p_node p, p)) ps) []
+
+    -- | Initial data array. Nodes have empty set of abstract terms.
+    d0 :: M.Map P (S.Set AbsTerm)
+    d0 = M.fromList (zip ps (repeat S.empty))
+
+    -- | Initial workset.
+    w0 :: S.Set P
+    w0 = S.empty
+
+    -- | Initial (graph, data array, workset).
+    grdw0 :: (G.Gr P Constr, M.Map P (S.Set AbsTerm), S.Set P)
+    grdw0 = build_graph constrs (g0, d0, w0)
+
+    -- | We need a fast mapping from `P` to graph nodes to be able to query edges
+    -- quickly.
+    --
+    -- Alternatively we could use `P` as graph keys but that's not something
+    -- that fgl allows to do.
+    p_node :: P -> G.Node
+    p_node (C l) = labelInt l
+    p_node (R v) = (1 `shiftL` 63) .|. varInt v
+
+    -- | Generate edges for a constraint.
+    constr_edges :: Constr -> [(G.Node, G.Node)]
+    constr_edges (Subset (Right p1) p2) = [(p_node p1, p_node p2)]
+    constr_edges (Cond _ p p1 p2)       = [(p_node p1, p_node p2), (p_node p, p_node p2)]
+
+    -- | Add edges to the graph.
+    build_graph :: [Constr]
+                -> (G.Gr P Constr, M.Map P (S.Set AbsTerm), S.Set P)
+                -> (G.Gr P Constr, M.Map P (S.Set AbsTerm), S.Set P)
+
+    build_graph [] grdw =
+      grdw
+
+    build_graph (Subset (Left t) p : rest) grdw =
+      build_graph rest $
+      add (S.singleton t) p grdw
+
+    build_graph (constr : rest) (gr, d, w) =
+      build_graph rest $
+      ( foldl' (\g (from, to) -> G.insEdge (from, to, constr) g)
+               gr
+               (constr_edges constr)
+      , d
+      , w
+      )
+
+
+    -- | Try to add terms to the given node. Add the node to the worklist if any
+    -- terms were added.
+    add ts p (gr, d, w)
+      | ts `S.isSubsetOf` fromJust (M.lookup p d)
+      = (gr, d, w)
+      | otherwise
+      = (gr, alterSet ts p d, S.insert p w)
+
+cfa :: Exp -> (Cache, Env)
+cfa e = solve (S.toList (labelsExp e)) (S.toList (varsExp e)) (S.toList (constrGen e (absTerms (expTerm e))))
+
+--------------------------------------------------------------------------------
+-- * Examples
+
+ex_3_1 :: Exp
+ex_3_1 = Exp (Exp (Fn (Var 0) (Exp (X (Var 0)) (Label 1))) (Label 2)
+              `App` Exp (Fn (Var 1) (Exp (X (Var 1)) (Label 3))) (Label 4))
+             (Label 5)
+
+ex_3_2 :: Exp
+ex_3_2 = Exp (Let g (Exp (Fix f x (Exp (App (Exp (X f) l1) (Exp (Fn y (Exp (X y) l2)) l3)) l4)) l5)
+               (Exp (App (Exp (X g) l6) (Exp (Fn z (Exp (X z) l7)) l8)) l9))
+             l10
+  where
+    (l1 : l2 : l3 : l4 : l5 : l6 : l7 : l8 : l9 : l10 : _) = map Label [ 1 .. ]
+    (g : x : y : f : z : _) = map Var [ 1 .. ]
 
 --------------------------------------------------------------------------------
 -- * Utils
