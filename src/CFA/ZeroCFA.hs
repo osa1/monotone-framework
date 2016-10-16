@@ -324,7 +324,7 @@ rhsToLs (R x) = LhsLs (Right (R x))
 -- | Table 3.7, graph-based O(n^3) constraint solver.
 --
 -- (even though we work on constraints, `n` here is the number of terms.
--- TODO: write about this is so)
+-- TODO: write about why this is so)
 --
 -- Here's how this works, in my own words (make sure to look at Table 3.7
 -- too):
@@ -333,9 +333,9 @@ rhsToLs (R x) = LhsLs (Right (R x))
 --   location 'l' in program we add a node C(l) and for every variable 'x' in the
 --   program we add a node r(x).
 --
--- * Nodes are annotated with a set of abstract values. These are the values
---   that "flow into" the location (if node is C(l) for a location l) or variable
---   (if node is r(x) for a variable x).
+-- * Each node is annotated with a set of abstract values. These are the values
+--   that "flow into" the location (if node is C(l) for a location l) or
+--   variable (if node is r(x) for a variable x).
 --
 --   In my implementation I use a mapping from nodes (typed 'P') to these sets.
 --   Initially these sets are empty.
@@ -372,11 +372,11 @@ rhsToLs (R x) = LhsLs (Right (R x))
 -- set too).
 --
 -- We start popping nodes from the workset, and consider outgoing edges of the
--- node. If we can "propagate" an abstract value from current node to one of the
--- neighbors, then we do it, and then add the neighbor to the workset. However,
--- if the constraint on the edge is a conditional in form `t <= p => p1 <= p2`,
--- we check the condition (see if `t` is in the set of `p`) before propagating
--- the abstract values from `p1` to `p2`.
+-- node. If an outgoing edge has annotation of form `p1 <= p2`, we "propagate"
+-- abstract values from current node to p2, and if any new nodes are added to p2
+-- we add `p2` to the workset. If an edge has annotation of form `{t} <= p => p1
+-- <= p2`, we do the same only if the condition holds, i.e. if `t` is in the set
+-- of `p`.
 --
 cfa2 :: [Label] -> [Var] -> [Constr] -> CFA
 cfa2 lbls vs constrs = CFA cache env
@@ -419,7 +419,6 @@ cfa2 lbls vs constrs = CFA cache env
         d0 = M.fromList (zip ps (repeat S.empty))
         w0 = S.empty
 
-
     -- | We need a fast mapping from `P` to graph nodes to be able to query edges
     -- quickly.
     --
@@ -455,7 +454,6 @@ cfa2 lbls vs constrs = CFA cache env
       , d
       , w
       )
-
 
     -- | Try to add terms to the given node. Add the node to the worklist if any
     -- terms were added.
