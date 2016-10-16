@@ -46,9 +46,11 @@ data Const = Const
 data Op = Op
   deriving (Show, Eq, Ord)
 
+-- | Free variables of an expression
 fvExp :: Exp -> S.Set Var
 fvExp = fvTerm . expTerm
 
+-- | Free variables of a term
 fvTerm :: Term -> S.Set Var
 fvTerm Con{}           = S.empty
 fvTerm (X v)           = S.singleton v
@@ -59,9 +61,11 @@ fvTerm (If e1 e2 e3)   = fvExp e1 `S.union` fvExp e2 `S.union` fvExp e3
 fvTerm (Let x e1 e2)   = fvExp e1 `S.union` S.delete x (fvExp e2)
 fvTerm (Binop e1 _ e2) = fvExp e1 `S.union` fvExp e2
 
+-- | Labels occuring in an expression
 labelsExp :: Exp -> S.Set Label
 labelsExp e = S.insert (expLbl e) (labelsTerm (expTerm e))
 
+-- | Labels occuring in a term
 labelsTerm :: Term -> S.Set Label
 labelsTerm Con{} = S.empty
 labelsTerm X{} = S.empty
@@ -72,9 +76,11 @@ labelsTerm (If e1 e2 e3) = labelsExp e1 `S.union` labelsExp e2 `S.union` labelsE
 labelsTerm (Let _ e1 e2) = labelsExp e1 `S.union` labelsExp e2
 labelsTerm (Binop e1 _ e2) = labelsExp e1 `S.union` labelsExp e2
 
+-- | Variables used in an expression (free or bound)
 varsExp :: Exp -> S.Set Var
 varsExp = varsTerm . expTerm
 
+-- | Terms used in an expression (free or bound)
 varsTerm :: Term -> S.Set Var
 varsTerm Con{} = S.empty
 varsTerm (X v) = S.singleton v
@@ -88,7 +94,7 @@ varsTerm (Binop e1 _ e2) = varsExp e1 `S.union` varsExp e2
 -- Result of a 0-CFA analysis is a pair
 --
 --   - abstract cache (C):
---     associates abstract values with each labelled program point.
+--     associates abstract values with each program point (label).
 --
 --   - abstract environment (rho):
 --     associates abstract values with each variable.
@@ -108,6 +114,14 @@ data CFA = CFA
   { _cache :: Cache
   , _env   :: Env
   }
+
+-- Ignores empty sets. For testing purposes.
+cfaEq :: CFA -> CFA -> Bool
+cfaEq (CFA cache1 env1) (CFA cache2 env2) =
+    filterEmpties (M.toList cache1) == filterEmpties (M.toList cache2) &&
+    filterEmpties (M.toList env1) == filterEmpties (M.toList env2)
+  where
+    filterEmpties = filter (not . S.null . snd)
 
 -- | Decision procedure for "acceptability relation" described in Table 3.1.
 --
@@ -202,7 +216,7 @@ absTerms (If e1 e2 e3) = absTerms (expTerm e1) `S.union` absTerms (expTerm e2) `
 absTerms (Let _ e1 e2) = absTerms (expTerm e1) `S.union` absTerms (expTerm e2)
 absTerms (Binop e1 _ e2) = absTerms (expTerm e1) `S.union` absTerms (expTerm e2)
 
--- | Table 3.6
+-- | 0-CFA constraint generator. Specified in Table 3.6.
 constrGen :: Exp -> S.Set AbsTerm -> S.Set Constr
 
 constrGen (Exp Con{} _) _ =
@@ -250,10 +264,9 @@ constrGen (Exp (Binop e1 _ e2) _) ts =
     S.union (constrGen e1 ts) $
     constrGen e2 ts
 
--- Using tuples to look the same as the implementation in the book
-
-fixpoint :: Exp -> (Cache, Env)
-fixpoint e = loop cfa0
+-- | A 0-CFA constraint solver. Chapter 3.4.2.
+cfa1 :: Exp -> CFA
+cfa1 e = uncurry CFA (loop cfa0)
   where
     cfa0 = (M.empty, M.empty)
     loop cfa
@@ -282,8 +295,10 @@ fixpoint e = loop cfa0
         f2' env (_,  C{}) = env
         f2' env (ls, R x) = alterSet (eval (cache, env) ls) x env
 
+-- | Left-hand side of a subset constraint.
 data Ls
   = LhsLs (Either AbsTerm P)
+      -- ^ {t} or p
   | CondLs AbsTerm P P
       -- ^ ({t} <= p1) => p2
 
@@ -363,52 +378,47 @@ rhsToLs (R x) = LhsLs (Right (R x))
 -- we check the condition (see if `t` is in the set of `p`) before propagating
 -- the abstract values from `p1` to `p2`.
 --
-solve :: [Label] -> [Var] -> [Constr] -> (Cache, Env)
-solve lbls vs constrs = (cache, env)
+cfa2 :: [Label] -> [Var] -> [Constr] -> CFA
+cfa2 lbls vs constrs = CFA cache env
   where
     d_sol = iter grdw0
     cache = M.fromList (map (\l -> (l, fromJust (M.lookup (C l) d_sol))) lbls)
     env   = M.fromList (map (\v -> (v, fromJust (M.lookup (R v) d_sol))) vs)
 
-    iter (gr, d, workset)
-      | Just (work, workset') <- S.minView workset
+    iter (gr0, d0, w0)
+      | Just (work, w1) <- S.minView w0
       = let
-          work_node = p_node work
-          work_edges = G.out gr work_node
+          work_node  = p_node work
+          work_edges = G.out gr0 work_node
         in
           iter $
-          foldl' (\(gr, d, workset) -> \case
-                                         Subset (Right p1) p2 ->
-                                             add (fromJust (M.lookup p1 d)) p2 (gr, d, workset)
-                                         Cond t p p1 p2
-                                           | t `S.member` fromJust (M.lookup p d) ->
-                                             add (fromJust (M.lookup p1 d)) p2 (gr, d, workset)
-                                           | otherwise -> (gr, d, workset))
-                 (gr, d, workset')
+          foldl' (\(gr, d, w) -> \case
+                                    Subset (Right p1) p2 ->
+                                        add (fromJust (M.lookup p1 d)) p2 (gr, d, w)
+                                    Cond t p p1 p2
+                                      | t `S.member` fromJust (M.lookup p d) ->
+                                        add (fromJust (M.lookup p1 d)) p2 (gr, d, w)
+                                      | otherwise -> (gr, d, w)
+                                    Subset Left{} _ ->
+                                        error "cfa2: Found a term relation edge.")
+                 (gr0, d0, w1)
                  (map G.edgeLabel work_edges)
 
       | otherwise
-      = d
+      = d0
 
     -- | Nodes of the graph.
     ps :: [P]
     ps = map C lbls ++ map R vs
 
-    -- | Initial graph has no edges.
-    g0 :: G.Gr P Constr
-    g0 = G.mkGraph (map (\p -> (p_node p, p)) ps) []
-
-    -- | Initial data array. Nodes have empty set of abstract terms.
-    d0 :: M.Map P (S.Set AbsTerm)
-    d0 = M.fromList (zip ps (repeat S.empty))
-
-    -- | Initial workset.
-    w0 :: S.Set P
-    w0 = S.empty
-
     -- | Initial (graph, data array, workset).
     grdw0 :: (G.Gr P Constr, M.Map P (S.Set AbsTerm), S.Set P)
     grdw0 = build_graph constrs (g0, d0, w0)
+      where
+        g0 = G.mkGraph (map (\p -> (p_node p, p)) ps) []
+        d0 = M.fromList (zip ps (repeat S.empty))
+        w0 = S.empty
+
 
     -- | We need a fast mapping from `P` to graph nodes to be able to query edges
     -- quickly.
@@ -423,6 +433,7 @@ solve lbls vs constrs = (cache, env)
     constr_edges :: Constr -> [(G.Node, G.Node)]
     constr_edges (Subset (Right p1) p2) = [(p_node p1, p_node p2)]
     constr_edges (Cond _ p p1 p2)       = [(p_node p1, p_node p2), (p_node p, p_node p2)]
+    constr_edges (Subset Left{} _)      = error "constr_edges: Can't generate edge for a term relation."
 
     -- | Add edges to the graph.
     build_graph :: [Constr]
@@ -454,8 +465,9 @@ solve lbls vs constrs = (cache, env)
       | otherwise
       = (gr, alterSet ts p d, S.insert p w)
 
-cfa :: Exp -> (Cache, Env)
-cfa e = solve (S.toList (labelsExp e)) (S.toList (varsExp e)) (S.toList (constrGen e (absTerms (expTerm e))))
+-- | Entry point for `cfa2`.
+cfa2' :: Exp -> CFA
+cfa2' e = cfa2 (S.toList (labelsExp e)) (S.toList (varsExp e)) (S.toList (constrGen e (absTerms (expTerm e))))
 
 --------------------------------------------------------------------------------
 -- * Examples
