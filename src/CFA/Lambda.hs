@@ -147,11 +147,16 @@ solve' cfa0 e0 = if next == cfa0 then cfa0 else solve' next e0
         iter e2 $
         CFA (foldl' constr2 lblVals e1_lams) (foldl' constr1 env e1_lams)
 
+--------------------------------------------------------------------------------
+-- * Utils
+
 alterSet :: (Ord k, Ord a) => S.Set a -> k -> M.Map k (S.Set a) -> M.Map k (S.Set a)
 alterSet s = M.alter (maybe (Just s) (Just . S.union s))
 
 lookup :: Ord k => k -> M.Map k (S.Set Exp) -> S.Set Exp
 lookup = M.findWithDefault S.empty
+
+--------------------------------------------------------------------------------
 
 test :: Bool
 test = solve example == solution
