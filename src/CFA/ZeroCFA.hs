@@ -485,6 +485,16 @@ ex_3_2 = Exp (Let g (Exp (Fix f x (Exp (App (Exp (X f) l1) (Exp (Fn y (Exp (X y)
     (l1 : l2 : l3 : l4 : l5 : l6 : l7 : l8 : l9 : l10 : _) = map Label [ 1 .. ]
     (g : x : y : f : z : _) = map Var [ 1 .. ]
 
+ex_3_32 :: Exp
+ex_3_32 = Exp (Let f (Exp (Fn x (Exp (X x) l1)) l2)
+                (Exp (App (Exp (App (Exp (X f) l3) (Exp (X f) l4)) l5)
+                          (Exp (Fn y (Exp (X y) l6)) l7))
+                          l8))
+              l9
+  where
+    (l1 : l2 : l3 : l4 : l5 : l6 : l7 : l8 : l9 : _) = map Label [ 1 .. ]
+    (f : x : y : _) = map Var [ 1 .. ]
+
 --------------------------------------------------------------------------------
 -- * Utils
 
