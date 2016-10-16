@@ -16,6 +16,8 @@ library
   exposed-modules:
     Analysis,
     Array,
+    CFA.Lambda,
+    CFA.ZeroCFA,
     CFG,
     SemiLattice,
     TIP.Analysis
