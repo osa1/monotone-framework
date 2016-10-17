@@ -497,6 +497,19 @@ ex_3_32 = Exp (Let f (Exp (Fn x (Exp (X x) l1)) l2)
     (l1 : l2 : l3 : l4 : l5 : l6 : l7 : l8 : l9 : _) = map Label [ 1 .. ]
     (f : x : y : _) = map Var [ 1 .. ]
 
+-- | An example with a captured variable.
+--
+--   (let g = (\a => a) in (\t => g t)) (fn z => z)
+--
+ex_capture :: Exp
+ex_capture = Exp (App (Exp (Let g (Exp (Fn a (Exp (X a) l1)) l2)
+                              (Exp (Fn t (Exp (App (Exp (X g) l3) (Exp (X t) l4)) l5)) l6)) l7)
+                      (Exp (Fn z (Exp (X z) l8)) l9))
+                 l10
+  where
+    (g : a : t : z : _) = map Var [ 1 .. ]
+    (l1 : l2 : l3 : l4 : l5 : l6 : l7 : l8 : l9 : l10 : _) = map Label [ 1 .. ]
+
 --------------------------------------------------------------------------------
 -- * Utils
 
