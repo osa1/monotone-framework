@@ -470,11 +470,14 @@ cfa2' e = cfa2 (S.toList (labelsExp e)) (S.toList (varsExp e)) (S.toList (constr
 --------------------------------------------------------------------------------
 -- * Examples
 
+-- | (fn x => x) (fn y => y)
 ex_3_1 :: Exp
 ex_3_1 = Exp (Exp (Fn (Var 0) (Exp (X (Var 0)) (Label 1))) (Label 2)
               `App` Exp (Fn (Var 1) (Exp (X (Var 1)) (Label 3))) (Label 4))
              (Label 5)
 
+-- | let g = (fun f x => f (fn y => y))
+--    in g (fn z => z)
 ex_3_2 :: Exp
 ex_3_2 = Exp (Let g (Exp (Fix f x (Exp (App (Exp (X f) l1) (Exp (Fn y (Exp (X y) l2)) l3)) l4)) l5)
                (Exp (App (Exp (X g) l6) (Exp (Fn z (Exp (X z) l7)) l8)) l9))
@@ -483,6 +486,7 @@ ex_3_2 = Exp (Let g (Exp (Fix f x (Exp (App (Exp (X f) l1) (Exp (Fn y (Exp (X y)
     (l1 : l2 : l3 : l4 : l5 : l6 : l7 : l8 : l9 : l10 : _) = map Label [ 1 .. ]
     (g : x : y : f : z : _) = map Var [ 1 .. ]
 
+-- | let f = (fn x => x) in ((f f) (fn y => y))
 ex_3_32 :: Exp
 ex_3_32 = Exp (Let f (Exp (Fn x (Exp (X x) l1)) l2)
                 (Exp (App (Exp (App (Exp (X f) l3) (Exp (X f) l4)) l5)
