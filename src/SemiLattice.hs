@@ -22,9 +22,11 @@ findTop lat = foldl' (join lat) (bottom lat) [ minBound .. maxBound ]
 
 -- | Generate a decision procedure for partial order relation (`<=`) of the
 -- given semilattice.
+--
+-- The relation must be reflexive, transitive, and anti-symmetric.
 latLtRel :: Eq a => SemiLattice a -> (a -> a -> Maybe Bool)
 latLtRel lat x y
-  | x == y    = Just True
+  | x   == y  = Just True
   | lub == x  = Just False
   | lub == y  = Just True
   | otherwise = Nothing
