@@ -6,6 +6,7 @@ module CFA.ZeroCFA where
 
 --------------------------------------------------------------------------------
 
+import Data.Bifunctor (first)
 import Data.Bits (shiftL, (.|.))
 import qualified Data.Graph.Inductive.Graph as G
 import qualified Data.Graph.Inductive.PatriciaTree as G
@@ -15,6 +16,8 @@ import Data.Maybe (fromJust)
 import qualified Data.Set as S
 
 import Prelude hiding (lookup)
+
+import Utils (span_right)
 
 --------------------------------------------------------------------------------
 
@@ -527,3 +530,13 @@ alterSet s = M.alter (maybe (Just s) (Just . S.union s))
 -- lattice elements.
 filterEmptySets :: M.Map k (S.Set v) -> M.Map k (S.Set v)
 filterEmptySets = M.filter (not . S.null)
+
+showCFA :: CFA -> String
+showCFA (CFA cache env) =
+    unlines ("Cache:" : map (ln . first labelInt) (M.toList cache) ++
+             "Env:" : map (ln . first varInt) (M.toList env))
+  where
+    ln (lbl, vals) = span_right 3 (show lbl) ++ ": " ++ show (S.toList vals)
+
+instance Show CFA where
+  show = showCFA
