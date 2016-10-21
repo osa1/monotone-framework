@@ -74,9 +74,9 @@ funCFG fun = CFG graph (M.singleton (funName fun) 0)
       -> G.Node -- ^ Continuation. This should be a node in the accumulator.
       -> Stmt   -- ^ Statement of current node
       -> ( [G.LNode Stmt]
-                -- ^ Node accumulator.
+                -- Node accumulator.
          , [G.LEdge ()]
-                -- ^ Edge accumulator. We don't accumulate edges in the graph
+                -- Edge accumulator. We don't accumulate edges in the graph
                 -- accumulator because we add edges to non-existing nodes during
                 -- the construction.
          )
