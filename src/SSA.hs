@@ -1,5 +1,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiWayIf                 #-}
+{-# LANGUAGE TupleSections              #-}
 
 -- | Here we experiment with "static single assignment" form.
 --
@@ -15,7 +16,7 @@ import Data.Foldable (toList)
 import qualified Data.Graph.Inductive.Graph as G
 import qualified Data.Graph.Inductive.PatriciaTree as G
 import qualified Data.Map as M
-import Data.Sequence ((|>))
+import Data.Sequence ((><), (|>))
 import qualified Data.Sequence as Seq
 import qualified Data.Set as S
 
@@ -23,6 +24,9 @@ import Control.Monad.State
 
 import Debug.Trace (trace)
 import Prelude hiding (mod, pred)
+
+import Data.Graph.Inductive.Dot (fglToDotString)
+import Text.Dot (showDot)
 
 --------------------------------------------------------------------------------
 -- * AST definition
@@ -63,14 +67,25 @@ data Fun = Fun
 type BBIdx = Int
 
 data BasicBlock = BasicBlock
-  { bbId         :: !Int
-  , bbStmts      :: ![Stmt']
+  { bbIdx        :: !BBIdx
+      -- ^ Basic block index in the control flow graph.
+  , bbStmts      :: !(Seq.Seq Stmt')
+      -- ^ Statements of the basic block.
   , bbTerminator :: !Terminator
-  }
+      -- ^ What to do after the block.
+  , bbPhis       :: !(M.Map Var [Var])
+      -- ^ Phi nodes
+  } deriving (Show)
+
+emptyBasicBlock :: BBIdx -> BasicBlock
+emptyBasicBlock bb_idx = BasicBlock bb_idx Seq.empty ReturnT M.empty
 
 type CFG = G.Gr BasicBlock ()
 
+type CFGNode = G.Context BasicBlock ()
+
 data Stmt' = Asgn' Var Exp'
+  deriving (Show)
 
 data Terminator
   = Jmp BBIdx
@@ -80,6 +95,7 @@ data Terminator
       !BBIdx  -- if false jump here
   | ReturnVar Var
   | ReturnT
+  deriving (Show)
 
 data Exp'
   = Con' Const
@@ -87,6 +103,7 @@ data Exp'
   | FunCall' Var [Var]
   | Binop' Var Binop Var
   | Unop' Unop Var
+  deriving (Show)
 
 --------------------------------------------------------------------------------
 -- * SSA construction
@@ -105,8 +122,6 @@ data SsaS = SsaS
   , freshVarCount   :: !Int
   , freshBlockCount :: !Int
   , graph           :: !CFG
-  , currentBB       :: !BBIdx
-  , currentStmts    :: !(Seq.Seq Stmt')
   }
 
 initSsaS :: SsaS
@@ -116,9 +131,7 @@ initSsaS = SsaS
   , incompletePhis  = M.empty
   , freshVarCount   = 0
   , freshBlockCount = 1
-  , graph           = G.mkGraph [(0, BasicBlock 0 [] ReturnT)] []
-  , currentBB       = 0
-  , currentStmts    = Seq.empty
+  , graph           = G.empty
   }
 
 writeVariable :: Var -> BBIdx -> Var -> SsaM ()
@@ -154,7 +167,10 @@ readVariableRecursive var block = do
           -> -- break potential cycles with operandless phi
              do val <- freshPhi
                 writeVariable var block val
-                addPhiOperands var val block
+                phi_ops <- readPhiOperands var val block
+                gr <- gets graph
+                let (preds, _, bb, succs) = G.context gr block
+                merge (preds, block, bb{ bbPhis = M.insert val phi_ops (bbPhis bb) }, succs)
                 return val
 
     writeVariable var block val
@@ -170,134 +186,136 @@ freshBlock =
       let bb = freshBlockCount st in
       ( bb
       , st{ freshBlockCount = bb + 1
-          , graph = G.insNode (bb, BasicBlock bb [] ReturnT) (graph st)
+          , graph = G.insNode (bb, emptyBasicBlock bb) (graph st)
           } )
 
--- | Determine operands from predecessors
-addPhiOperands :: Var -> Var -> BBIdx -> SsaM ()
-addPhiOperands var phi block = do
+merge :: G.Context BasicBlock () -> SsaM ()
+merge ctx = modify' $ \s -> s{ graph = ctx G.& graph s }
+
+-- | Determine operands from predecessors.
+readPhiOperands :: Var -> Var -> BBIdx -> SsaM [Var]
+readPhiOperands var phi block = do
     st <- get
     let preds = G.pre (graph st) block
-    pred_vars <- mapM (readVariable var) preds
-    -- TODO: try to remove trivial phis
-    -- TODO: we don't keep phi operands yet
-    trace ("phi operands: " ++ show pred_vars) (return ())
+    mapM (readVariable var) preds
 
 sealBlock :: BBIdx -> SsaM ()
 sealBlock block = do
-    incomplete_phis <- gets incompletePhis
-    forM_ (M.toList (M.findWithDefault M.empty block incomplete_phis)) $
-      \(var, var_phi) -> addPhiOperands var var_phi block
-    modify' $ \s -> s{ sealedBlocks = S.insert block (sealedBlocks s) }
+    SsaS{ incompletePhis = incomplete_phis, graph = gr } <- get
 
-addStmt :: Stmt' -> SsaM ()
-addStmt stmt = modify' $ \s -> s{ currentStmts = currentStmts s |> stmt }
+    -- ask predecessors for the values of this variable
+    bb_phis <-
+      M.fromList <$>
+        forM (M.toList (M.findWithDefault M.empty block incomplete_phis))
+          (\(var, var_phi) -> (var,) <$> readPhiOperands var var_phi block)
 
-setCurBB :: BBIdx -> SsaM ()
-setCurBB bb = modify' $ \s -> s{ currentBB = bb, currentStmts = Seq.empty }
+    -- add phi to the graph
+    let (preds, _, bb, succs) = G.context gr block
+    let gr' = (preds, block, bb{ bbPhis = bb_phis `M.union` bbPhis bb }, succs) G.& gr
 
-setGraph :: CFG -> SsaM ()
-setGraph gr = modify' $ \s -> s{ graph = gr }
+    modify' $ \s -> s{ sealedBlocks = S.insert block (sealedBlocks s)
+                     , graph = gr'
+                     }
 
-terminate :: BBIdx -> SsaM ()
-terminate dest = do
-    SsaS{ graph = gr, currentBB = cur_bb } <- get
-    let (preds, _, bb, succs) = G.context gr cur_bb
-    let gr' = (preds, cur_bb, bb{ bbTerminator = Jmp dest }, ((), dest) : succs) G.& gr
-    modify' $ \s -> s{ graph = gr' }
 
-buildSSA :: Stmt -> SsaM ()
+buildSSA :: Stmt -> CFG
+buildSSA stmt = graph (execState (runSsaM (buildSSA' stmt ([], 0, emptyBasicBlock 0, []))) initSsaS)
 
-buildSSA (Seq s1 s2) = buildSSA s1 >> buildSSA s2
+buildSSA' :: Stmt -> CFGNode -> SsaM CFGNode
 
-buildSSA Skip        = return ()
+buildSSA' (Seq s1 s2) node = buildSSA' s1 node >>= buildSSA' s2
 
-buildSSA (Return e)  = do
-    e' <- bind_exp e
+buildSSA' Skip node = return node
 
-    -- terminate current basic block
-    SsaS{ graph = gr, currentStmts = stmts, currentBB = cur_bb } <- get
-    let (preds, _, _, succs) = G.context gr cur_bb
-    let bb = BasicBlock cur_bb (toList stmts) (ReturnVar e')
-    let gr' = (preds, cur_bb, bb, succs) G.& gr
+buildSSA' (Return e) (preds, cur_bb, bb, succs)  = do
+    (e_var, e_stmts) <- bind_exp e cur_bb
+    -- terminate the basic block
+    let bb' = bb{ bbStmts = bbStmts bb >< e_stmts
+                , bbTerminator = ReturnVar e_var }
 
-    setGraph gr'
-    setCurBB (-1)
+    -- TODO: Not sure about that part. We need to make sure that after a return
+    -- we don't extend current basic block anymore.
+    -- merge (preds, cur_bb, bb', succs)
+    return (preds, cur_bb, bb', succs)
 
-buildSSA (Asgn var rhs) = do
-    rhs' <- flatten_exp rhs
+buildSSA' (Asgn var rhs) (preds, cur_bb, bb, succs) = do
+    (rhs', rhs_stmts) <- flatten_exp rhs cur_bb
     var' <- freshVar
-    cur_bb <- gets currentBB
     writeVariable var cur_bb var'
-    modify' $ \s -> s{ currentStmts = currentStmts s |> Asgn' var' rhs' }
+    return (preds, cur_bb, bb{ bbStmts = (bbStmts bb >< rhs_stmts) |> Asgn' var' rhs' }, succs)
 
-buildSSA (If cond then_s else_s) = do
-    cond'  <- bind_exp cond
+buildSSA' (If cond then_s else_s) (preds, cur_bb, bb, _) = do
     then_b <- freshBlock
     else_b <- freshBlock
-    cont_b <- freshBlock
+    cont_b <- freshBlock -- continuation
 
-    SsaS{ graph = gr, currentStmts = stmts, currentBB = cur_bb } <- get
-    let bb = BasicBlock cur_bb (toList stmts) (CondJmp cond' then_b else_b)
-    let (preds, _, _, _) = G.context gr cur_bb
-    let gr' = (preds, cur_bb, bb, [((), then_b), ((), else_b)]) G.& gr
+    (cond_var, cond_stmts) <- bind_exp cond cur_bb
+    sealBlock cur_bb
+    merge (preds, cur_bb, bb{ bbStmts = bbStmts bb >< cond_stmts
+                            , bbTerminator = CondJmp cond_var then_b else_b }, [((), then_b), ((), else_b)])
 
-    -- then branch
-    setGraph gr'
-    setCurBB then_b
-    buildSSA then_s
-    terminate cont_b
+    let branch_preds = [((), cur_bb)]
+    let branch_succs = [((), cont_b)]
+    merge =<< buildSSA' then_s (branch_preds, then_b, emptyBasicBlock then_b, branch_succs)
+    sealBlock then_b
+    merge =<< buildSSA' else_s (branch_preds, else_b, emptyBasicBlock else_b, branch_succs)
+    sealBlock else_b
 
-    -- else branch
-    setCurBB else_b
-    buildSSA else_s
-    terminate cont_b
+    let cont_preds = [((), then_b), ((), else_b)]
+    let cont_ctx = (cont_preds, cont_b, emptyBasicBlock cont_b, [])
+    merge cont_ctx
+    sealBlock cont_b
+    return cont_ctx
 
-    setCurBB cont_b
-
-buildSSA (While cond body) = do
-    cond'  <- bind_exp cond
+buildSSA' (While cond body) (preds, cur_bb, bb, succs) = do
+    cond_b <- freshBlock
     body_b <- freshBlock
-    cont_b <- freshBlock
+    cont_b <- freshBlock -- continuation
 
-    SsaS{ graph = gr, currentStmts = stmts, currentBB = cur_bb } <- get
-    let bb = BasicBlock cur_bb (toList stmts) (CondJmp cond' body_b cont_b)
-    let (preds, _, _, _) = G.context gr cur_bb
-    let gr' = (preds, cur_bb, bb, [((), body_b), ((), cont_b)]) G.& gr
+    -- terminate current bb, jump to the condition
+    merge (preds, cur_bb, bb{ bbTerminator = Jmp cond_b }, ((), cond_b) : succs)
+
+    -- condition
+    (cond_var, cond_stmts) <- bind_exp cond cond_b
+    merge ( [((), cur_bb)]
+          , cond_b
+          , BasicBlock cond_b cond_stmts (CondJmp cond_var body_b cont_b) M.empty
+          , [((), cond_b)] )
+    sealBlock cond_b
 
     -- body
-    setGraph gr'
-    setCurBB body_b
-    buildSSA body
-    terminate cont_b
+    merge =<< buildSSA' body ([((), cond_b)], body_b, emptyBasicBlock body_b, [((), cond_b)])
+    sealBlock body_b
+
+    sealBlock cond_b
 
     -- continuation
-    setCurBB cont_b
+    return ([((), cond_b)], cont_b, emptyBasicBlock cont_b, [])
 
-flatten_exp :: Exp -> SsaM Exp'
-flatten_exp (Con c) = return (Con' c)
-flatten_exp (Var v) = gets currentBB >>= fmap Var' . readVariable v
-flatten_exp (FunCall f as) = FunCall' <$> bind_exp f <*> mapM bind_exp as
-flatten_exp (Binop e1 op e2) = do
-    e1' <- bind_exp e1
-    e2' <- bind_exp e2
-    return (Binop' e1' op e2')
-flatten_exp (Unop op e) = Unop' op <$> bind_exp e
-
-bind_exp :: Exp -> SsaM Var
-
-bind_exp (Con c) = do
+bind_exp :: Exp -> BBIdx -> SsaM (Var, Seq.Seq Stmt')
+bind_exp (Con c) _ = do
     v <- freshVar
-    addStmt (Asgn' v (Con' c))
-    return v
+    return (v, Seq.singleton (Asgn' v (Con' c)))
+bind_exp (Var v) cur_bb = (, Seq.empty) <$> readVariable v cur_bb
+bind_exp e cur_bb = do
+    (e', e_stmts) <- flatten_exp e cur_bb
+    v <- freshVar
+    return (v, e_stmts |> Asgn' v e')
 
-bind_exp (Var v) = gets currentBB >>= readVariable v
-
-bind_exp e = do
-    e' <- flatten_exp e
-    v  <- freshVar
-    addStmt (Asgn' v e')
-    return v
+flatten_exp :: Exp -> BBIdx -> SsaM (Exp', Seq.Seq Stmt')
+flatten_exp (Con c) _ = return (Con' c, Seq.empty)
+flatten_exp (Var v) cur_bb = (, Seq.empty) . Var' <$> readVariable v cur_bb
+flatten_exp (FunCall f as) cur_bb = do
+    (f', f_stmts) <- bind_exp f cur_bb
+    as' <- mapM (\a -> bind_exp a cur_bb) as
+    return (FunCall' f' (map fst as'), f_stmts >< foldr (><) Seq.empty (map snd as'))
+flatten_exp (Binop e1 op e2) cur_bb = do
+    (e1', e1_stmts) <- bind_exp e1 cur_bb
+    (e2', e2_stmts) <- bind_exp e2 cur_bb
+    return (Binop' e1' op e2', e1_stmts >< e2_stmts)
+flatten_exp (Unop op e) cur_bb = do
+    (e', e_stmts) <- bind_exp e cur_bb
+    return (Unop' op e', e_stmts)
 
 --------------------------------------------------------------------------------
 -- * Utils
@@ -320,3 +338,12 @@ modifyMap' ins mod = modifyMap (maybe ins mod)
 
 modifyMap :: Ord k => (Maybe a -> a) -> k -> M.Map k a -> M.Map k a
 modifyMap a k m = M.alter (Just . a) k m
+
+--------------------------------------------------------------------------------
+-- * Examples
+
+fig2 :: Stmt
+fig2 =
+    Asgn 1 (Con Const) `Seq`
+    While (Con Const) (If (Con Const) (Asgn 1 (Con Const)) Skip) `Seq`
+    Asgn 3 (FunCall (Var 2) [Var 1])
