@@ -220,10 +220,6 @@ merge :: CFGNode -> SsaM ()
 merge (preds, bb_idx, bb, succs) =
     modify' $ \s -> s{ graph = (edgesToFglEdges preds, bbInt bb_idx, bb, edgesToFglEdges succs) G.& graph s }
 
-mergeCFG :: CFGNode -> CFG -> CFG
-mergeCFG (preds, bb_idx, bb, succs) cfg =
-    (edgesToFglEdges preds, bbInt bb_idx, bb, edgesToFglEdges succs) G.& cfg
-
 context :: BBIdx -> SsaM CFGNode
 context b = do
     gr <- gets graph
