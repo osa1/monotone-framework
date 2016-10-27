@@ -11,9 +11,8 @@ module SSA where
 
 --------------------------------------------------------------------------------
 
-import Data.Coerce (coerce)
-import qualified Data.Graph.Inductive.Graph as G
-import qualified Data.Graph.Inductive.PatriciaTree as G
+import Control.Exception (assert)
+import Data.Foldable (toList)
 import qualified Data.Map.Strict as M
 import Data.Sequence ((><), (|>))
 import qualified Data.Sequence as Seq
@@ -24,8 +23,7 @@ import Control.Monad.State.Strict
 import Debug.Trace (trace)
 import Prelude hiding (mod, pred)
 
-import Data.Graph.Inductive.Dot (fglToDotString)
-import Text.Dot (showDot)
+import Utils (span_right)
 
 --------------------------------------------------------------------------------
 -- * AST definition
@@ -76,15 +74,14 @@ data BasicBlock = BasicBlock
       -- ^ What to do after the block.
   , bbPhis       :: !(M.Map Var [Var])
       -- ^ Phi nodes
+  , bbVarDefs    :: !(M.Map Var Var)
+      -- ^ Exported values of variable in the basic block.
+  , bbIsSealed   :: !Bool
+      -- ^ Can more predecessors be added to the block?
   } deriving (Show)
 
 emptyBasicBlock :: BBIdx -> BasicBlock
-emptyBasicBlock bb_idx = BasicBlock bb_idx Seq.empty ReturnT M.empty
-
-type CFG = G.Gr BasicBlock ()
-
-type Adj     = [BBIdx]
-type CFGNode = (Adj, BBIdx, BasicBlock, Adj)
+emptyBasicBlock bb_idx = BasicBlock bb_idx Seq.empty ReturnT M.empty M.empty False
 
 data Stmt' = Asgn' Var Exp'
   deriving (Show)
@@ -114,92 +111,125 @@ data Exp'
 
 type Phi = Var
 
+-- | A map from a basic block to its predecessors in the control-flow graph.
+type Preds = M.Map BBIdx (S.Set BBIdx)
+
+-- | Make first basic block a predecessor of the second basic block.
+mkPred :: BBIdx -> BBIdx -> Preds -> Preds
+mkPred bb1 bb2 preds = M.alter (maybe (Just (S.singleton bb2)) (Just . S.insert bb2)) bb1 preds
+
+-- preds :: BBIdx -> Preds -> S.Set BBIdx
+-- preds bb edges = M.findWithDefault (error ("Can't find bb: " ++ show bb)) bb edges
+
 newtype SsaM a = SsaM { runSsaM :: State SsaS a }
   deriving (Functor, Applicative, Monad, MonadState SsaS)
 
 data SsaS = SsaS
-  { varDefs         :: !(M.Map Var (M.Map BBIdx Var))
-      -- ^ Exported variables.
-  , sealedBlocks    :: !(S.Set BBIdx)
-      -- ^ Blocks with known predecessors (i.e. no new predecessors will be
-      -- added).
-  , incompletePhis  :: !(M.Map BBIdx (M.Map Var Phi))
-      -- ^ Argumnet-less phi nodes added for breaking loops.
+  { incompletePhis  :: !(M.Map BBIdx (M.Map Var Phi))
+      -- ^ Argument-less phi nodes added for breaking loops. When a block is
+      -- sealed, we remove it from this map and update its phi nodes.
   , freshVarCount   :: !Int
       -- ^ Counter for fresh variable generation.
   , freshBlockCount :: !Int
       -- ^ Variable for fresh basic block generation.
-  , graph           :: !CFG
-      -- ^ The control flow graph.
+  , predGraph       :: !Preds
+      -- ^ Predecessor graph. Edge A to B means B is a predecessor of A in
+      -- control flow graph.
+  , blocks          :: !(M.Map BBIdx BasicBlock)
+      -- ^ Basic blocks in the control flow graph.
   }
 
 initSsaS :: SsaS
 initSsaS = SsaS
-  { varDefs         = M.empty
-  , sealedBlocks    = S.empty
-  , incompletePhis  = M.empty
+  { incompletePhis  = M.empty
   , freshVarCount   = 0
-  , freshBlockCount = 1
-  , graph           = G.empty
+  , freshBlockCount = 0
+  , predGraph       = M.empty
+  , blocks          = M.empty
   }
+
+addPreds :: BBIdx -> [BBIdx] -> SsaM ()
+addPreds bb preds = modify' $ \s -> s{ predGraph = adjust' (S.union (S.fromList preds)) bb (predGraph s) }
+
+blockBB :: BBIdx -> SsaM BasicBlock
+blockBB bb = M.findWithDefault (bbNotInGraph bb) bb <$> gets blocks
+
+blockPreds :: BBIdx -> SsaM (S.Set BBIdx)
+blockPreds bb = M.findWithDefault (bbNotInGraph bb) bb <$> gets predGraph
+
+bbNotInGraph :: BBIdx -> a
+bbNotInGraph bb = error ("Basic block " ++ show (bbInt bb) ++ " is not in the graph.")
 
 --------------------------------------------------------------------------------
 -- * Helpers, SsaM operations
+
+modifyBB :: BBIdx -> (BasicBlock -> BasicBlock) -> SsaM ()
+modifyBB bb f = modify' (\s -> s{ blocks = adjust' f bb (blocks s) })
+
+addPhi :: BBIdx -> Var -> Phi -> [Var] -> SsaM ()
+addPhi bb var phi args =
+    modifyBB bb $ \b -> b{ bbPhis    = M.insert phi args (bbPhis b)
+                         , bbVarDefs = M.insert var phi  (bbVarDefs b) }
 
 -- | Set exported value in a basic block for a source variable.
 writeVariable :: Var -> BBIdx -> Var -> SsaM ()
 writeVariable var block val = modify' f
   where
-    f st = st{ varDefs = modifyMap'' M.singleton M.insert block val var (varDefs st) }
+    f st = st{ blocks = alter' (maybe (emptyBasicBlock block){ bbVarDefs = M.singleton var val }
+                                      (\b -> b{ bbVarDefs = M.insert var val (bbVarDefs b) }))
+                               block
+                               (blocks st) }
 
 -- | Read exported value of a variable in a basic block. Recursively query
 -- predecessors if the variable is not defined in the block.
 readVariable :: Var -> BBIdx -> SsaM Var
 readVariable var block = do
-    defs <- gets varDefs
+    bs <- gets blocks
     maybe (readVariableRecursive var block) return $
-      M.lookup var defs >>= M.lookup block
+      M.lookup block bs >>= M.lookup var . bbVarDefs
+
+freshPhi, freshVar :: SsaM Var
+freshPhi = freshVar
+freshVar = state (\st -> (Var (freshVarCount st), st{ freshVarCount = freshVarCount st + 1 }))
 
 -- | Recursively query exported values of predecessors for a given variable.
 -- May introduce a phi node.
 readVariableRecursive :: Var -> BBIdx -> SsaM Var
 readVariableRecursive var block = do
-    gr <- gets graph
-    sealeds <- gets sealedBlocks
-    let preds = coerce (G.pre gr (bbInt block))
+    bb <- blockBB block
+    preds <- S.toList <$> blockPreds block
 
     val <-
-      if | not (S.member block sealeds)
+      if | not (bbIsSealed bb)
           -> -- new predecessors may be added to the block, introduce a phi and
              -- record it as "incomplete"
              do val <- freshPhi
-                -- trace ("inserting incomplete phi for node " ++ show block) (return ())
+                trace ("inserting incomplete phi for node " ++ show block) (return ())
                 modify' $ \st ->
                   st{ incompletePhis =
                         modifyMap'' M.singleton M.insert var val block (incompletePhis st) }
                 return val
 
+         ------------------------------------
          -- other cases are for sealed blocks
+         ------------------------------------
 
          | [pred] <- preds
           -> -- optimize the common case of one predecessor: No phi needed
+             trace ("single pred") $
              readVariable var pred
 
          | otherwise
           -> -- break potential cycles with operandless phi
-             do val <- freshPhi
+             do trace ("inserting operandless phi") (return ())
+                val <- freshPhi
                 writeVariable var block val
-                phi_ops <- mapM (readVariable var) preds
-                (_, _, bb, _) <- context block
-                merge ([], block, bb{ bbPhis = M.insert val phi_ops (bbPhis bb) }, [])
+                phi_args <- mapM (readVariable var) preds
+                addPhi block var val phi_args
                 return val
 
     writeVariable var block val
     return val
-
-freshPhi, freshVar :: SsaM Var
-freshPhi = freshVar
-freshVar = state (\st -> (Var (freshVarCount st), st{ freshVarCount = freshVarCount st + 1 }))
 
 freshBlock :: SsaM BBIdx
 freshBlock =
@@ -207,123 +237,124 @@ freshBlock =
       let bb = freshBlockCount st in
       ( BBIdx bb
       , st{ freshBlockCount = bb + 1
-          , graph = G.insNode (bb, emptyBasicBlock (BBIdx bb)) (graph st)
-          } )
-
-edgeToFglEdge :: BBIdx -> ((), G.Node)
-edgeToFglEdge bb_idx = ((), bbInt bb_idx)
-
-edgesToFglEdges :: [BBIdx] -> G.Adj ()
-edgesToFglEdges = map edgeToFglEdge
-
-merge :: CFGNode -> SsaM ()
-merge (preds, bb_idx, bb, succs) =
-    modify' $ \s -> s{ graph = (edgesToFglEdges preds, bbInt bb_idx, bb, edgesToFglEdges succs) G.& graph s }
-
-context :: BBIdx -> SsaM CFGNode
-context b = do
-    gr <- gets graph
-    let (preds, bb_idx, bb, succs) = G.context gr (bbInt b)
-    return (map (BBIdx . snd) preds, BBIdx bb_idx, bb, map (BBIdx . snd) succs)
+          , blocks          = M.insert (BBIdx bb) (emptyBasicBlock (BBIdx bb)) (blocks st)
+          , predGraph       = M.insert (BBIdx bb) S.empty (predGraph st) } )
 
 -- | Mark a block as "sealed". A block is sealed when all of its predecessors
 -- are known. We complete incomplete phis in the basic block when it's sealed.
 --
 -- We never ask predecessors of non-sealed blocks, so no need for actually
 -- adding edges to the graph until a block is sealed.
-sealBlock :: CFGNode -> SsaM ()
-sealBlock (preds, block, bb, succs) = do
+sealBlock :: BBIdx -> SsaM ()
+sealBlock block = do
     -- trace ("sealBlock: " ++ show bb) (return ())
-    incomplete_phis <- gets incompletePhis
-    -- trace ("incompletePhis: " ++ show incomplete_phis) (return ())
+    -- trace ("succs: " ++ show succs) (return ())
+    incomplete_phis <-
+      state (\s -> (incompletePhis s, s{ incompletePhis = M.delete block (incompletePhis s) }))
+
+    trace ("incompletePhis: " ++ show incomplete_phis) (return ())
     let bb_incomplete_phis = M.findWithDefault M.empty block incomplete_phis
 
     -- ask predecessors for the values of this variable
+    preds <- S.toList <$> blockPreds block
     bb_phis <-
       M.fromList <$>
         forM (M.toList bb_incomplete_phis)
           (\(var, var_phi) -> (var_phi,) <$> mapM (readVariable var) preds)
 
-    -- trace ("bb_phis: " ++ show bb_phis) (return ())
+    trace ("bb_phis: " ++ show bb_phis) (return ())
 
     -- add the node to the graph
-    merge (preds, block, bb{ bbPhis = bb_phis `M.union` bbPhis bb }, succs)
-    modify' $ \s -> s{ sealedBlocks   = S.insert block (sealedBlocks s)
-                     , incompletePhis = M.delete block (incompletePhis s) }
+    modifyBB block $ \bb -> bb{ bbIsSealed = True
+                              , bbPhis     = bb_phis `M.union` bbPhis bb }
 
 --------------------------------------------------------------------------------
 
-buildSSA :: Stmt -> CFG
+buildSSA :: Stmt -> ([BasicBlock], Preds)
 buildSSA stmt =
     let
-      (SsaS{ graph = gr, sealedBlocks = sealeds }) =
-        execState (runSsaM (sealBlock =<< buildSSA' stmt ([], BBIdx 0, emptyBasicBlock (BBIdx 0), []))) initSsaS
+      ssa = execState (runSsaM (do entry <- freshBlock
+                                   sealBlock entry
+                                   buildSSA' stmt entry)) initSsaS
     in
-      -- trace ("sealed blocks: " ++ show sealeds) $
-      gr
+      assert (M.null (incompletePhis ssa)) $
+      assert (all bbIsSealed (M.elems (blocks ssa))) $
+      (M.elems (blocks ssa), predGraph ssa)
 
-buildSSA' :: Stmt -> CFGNode -> SsaM CFGNode
+buildSSA' :: Stmt -> BBIdx -> SsaM BBIdx
 
-buildSSA' (Seq s1 s2) node = buildSSA' s1 node >>= buildSSA' s2
+buildSSA' (Seq s1 s2) bb = buildSSA' s1 bb >>= buildSSA' s2
 
-buildSSA' Skip node = return node
+buildSSA' Skip bb = return bb
 
-buildSSA' (Return e) (preds, cur_bb, bb, succs)  = do
-    (e_var, e_stmts) <- bind_exp e cur_bb
+buildSSA' (Return e) bb  = do
+    (e_var, e_stmts) <- bind_exp e bb
     -- terminate the basic block
-    let bb' = bb{ bbStmts = bbStmts bb >< e_stmts
-                , bbTerminator = ReturnVar e_var }
+    modifyBB bb $ \b -> b{ bbStmts = bbStmts b >< e_stmts
+                         , bbTerminator = ReturnVar e_var }
 
     -- TODO: Not sure about that part. We need to make sure that after a return
     -- we don't extend current basic block anymore.
-    sealBlock (preds, cur_bb, bb', succs)
-    return ([], BBIdx (-1), emptyBasicBlock (BBIdx (-1)), [])
+    return (BBIdx (-1))
 
-buildSSA' (Asgn var rhs) (preds, cur_bb, bb, succs) = do
-    (rhs', rhs_stmts) <- flatten_exp rhs cur_bb
+buildSSA' (Asgn var rhs) bb = do
+    (rhs', rhs_stmts) <- flatten_exp rhs bb
     var' <- freshVar
-    writeVariable var cur_bb var'
-    return (preds, cur_bb, bb{ bbStmts = (bbStmts bb >< rhs_stmts) |> Asgn' var' rhs' }, succs)
+    writeVariable var bb var'
+    modifyBB bb $ \b -> b{ bbStmts = (bbStmts b >< rhs_stmts) |> Asgn' var' rhs' }
+    return bb
 
-buildSSA' (If cond then_s else_s) (preds, cur_bb, bb, succs) = do
+
+buildSSA' (If cond then_s else_s) bb = do
     then_b <- freshBlock
     else_b <- freshBlock
     cont_b <- freshBlock -- continuation
 
-    (cond_var, cond_stmts) <- bind_exp cond cur_bb
-    sealBlock (preds,
-               cur_bb,
-               bb{ bbStmts = bbStmts bb >< cond_stmts
-                 , bbTerminator = CondJmp cond_var then_b else_b },
-               [then_b, else_b])
+    addPreds cont_b [then_b, else_b]
+    addPreds then_b [bb]
+    addPreds else_b [bb]
 
-    let branch_preds = [cur_bb]
-    let branch_succs = [cont_b]
-    sealBlock =<< buildSSA' then_s (branch_preds, then_b, emptyBasicBlock then_b, branch_succs)
-    sealBlock =<< buildSSA' else_s (branch_preds, else_b, emptyBasicBlock else_b, branch_succs)
+    sealBlock then_b
+    sealBlock else_b
+    sealBlock cont_b
 
-    return ([then_b, else_b], cont_b, emptyBasicBlock cont_b, succs)
+    (cond_var, cond_stmts) <- bind_exp cond bb
+    modifyBB bb $ \b -> b{ bbStmts = bbStmts b >< cond_stmts
+                         , bbTerminator = CondJmp cond_var then_b else_b }
 
-buildSSA' (While cond body) (preds, cur_bb, bb, succs) = do
+    void (buildSSA' then_s then_b)
+    void (buildSSA' else_s else_b)
+
+    return cont_b
+
+buildSSA' (While cond body) bb = do
     cond_b <- freshBlock
     body_b <- freshBlock
     cont_b <- freshBlock -- continuation
 
+    addPreds cond_b [body_b, bb]
+    addPreds body_b [cond_b]
+    addPreds cont_b [cond_b]
+
+    sealBlock cond_b
+    sealBlock body_b
+    sealBlock cont_b
+
+    -- trace ("body_b: " ++ show body_b) (return ())
+    -- trace ("cont_b: " ++ show cont_b) (return ())
+
     -- terminate current bb, jump to the condition
-    sealBlock (preds, cur_bb, bb{ bbTerminator = Jmp cond_b }, [cond_b])
+    modifyBB bb $ \b -> b{ bbTerminator = Jmp cond_b }
 
     -- condition
     (cond_var, cond_stmts) <- bind_exp cond cond_b
-    sealBlock ( [cur_bb, body_b]
-              , cond_b
-              , BasicBlock cond_b cond_stmts (CondJmp cond_var body_b cont_b) M.empty
-              , [body_b, cont_b] )
+    modifyBB cond_b $ \b -> b{ bbStmts = cond_stmts, bbTerminator = CondJmp cond_var body_b cont_b }
 
     -- body
-    sealBlock =<< buildSSA' body ([cond_b], body_b, emptyBasicBlock body_b, [cond_b])
+    void (buildSSA' body body_b)
 
     -- continuation
-    return ([cond_b], cont_b, emptyBasicBlock cont_b, succs)
+    return cont_b
 
 bind_exp :: Exp -> BBIdx -> SsaM (Var, Seq.Seq Stmt')
 bind_exp (Con c) _ = do
@@ -372,6 +403,18 @@ modifyMap' ins mod = modifyMap (maybe ins mod)
 modifyMap :: Ord k => (Maybe a -> a) -> k -> M.Map k a -> M.Map k a
 modifyMap a k m = M.alter (Just . a) k m
 
+-- | A variant of 'Data.Map.alter' that doesn't allow removing entries. Type
+alter' :: Ord k => (Maybe a -> a) -> k -> M.Map k a -> M.Map k a
+alter' f = M.alter (Just . f)
+
+-- | A variant of 'Data.Map.adjust' that fails if key is not in the map.
+adjust' :: (Show k, Ord k) => (a -> a) -> k -> M.Map k a -> M.Map k a
+adjust' f k m
+  | Just a <- M.lookup k m
+  = M.insert k (f a) m
+  | otherwise
+  = error ("adjust': Key not in map: " ++ show k)
+
 --------------------------------------------------------------------------------
 -- * Examples
 
@@ -381,5 +424,16 @@ fig2 =
     While (Con Const) (If (Con Const) (Asgn (Var 1) (Con Const)) Skip) `Seq`
     Asgn (Var 3) (FunCall (X (Var 2)) [X (Var 1)])
 
-runExample :: IO ()
-runExample = putStrLn (showDot ( (fglToDotString . G.nemap show (const "")) (buildSSA fig2)))
+runExample :: Stmt -> IO ()
+runExample stmt = do
+    let (blocks, preds) = buildSSA stmt
+    putStrLn "=== BLOCKS ==="
+    mapM_ (\b -> print_block b (M.findWithDefault (bbNotInGraph (bbIdx b)) (bbIdx b) preds)) blocks
+  where
+    print_block :: BasicBlock -> S.Set BBIdx -> IO ()
+    print_block bb preds = do
+      putStrLn (span_right 10 (show (bbInt (bbIdx bb))) ++ ": " ++ show (toList (bbStmts bb)))
+      putStrLn (span_right 12 "preds: " ++ show (S.toList preds))
+      putStrLn (span_right 12 "phis: " ++ show (M.toList (bbPhis bb)))
+      putStrLn (span_right 10 "terminator: " ++ show (bbTerminator bb))
+      putStrLn ""
